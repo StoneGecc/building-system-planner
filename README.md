@@ -1,6 +1,9 @@
 # Building system planner
 
 CSV-driven viewer and tooling for building-system assemblies (plans, sections, exports). The web app lives in `viewer/`; Python helpers for CSV normalization and merging are in `scripts/`.
+<img width="1352" height="872" alt="Screenshot 2026-03-22 at 7 05 30 PM" src="https://github.com/user-attachments/assets/620e8350-e45e-4e7b-83e3-4cff556f2e96" />
+
+
 
 ## Data
 
