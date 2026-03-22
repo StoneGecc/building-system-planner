@@ -1,0 +1,21 @@
+System_ID,System_Type,Location,Stack_Direction,System_Name,Category,#,Layer,Material,Thickness_in,Approx_R_Value,Connection,Fastener,Fastener_Size,Layer_Type,Fill,Fastener_Icon,Fastener_Spacing_OC_in,Min_Edge_Dist_in,Min_End_Dist_in,Fastener_Pattern,Typ_Module_Width_in,Element_Spacing_OC_in,Cavity_Depth_in,Control_Joint_Spacing_ft,Config_Key,Config_Value,Sheet_Order,Diagram_Label,Diagram_Hatch,Diagram_Section_Zones_JSON,Diagram_Plan_Zones_JSON,View_Orientation,View_Reverse,View_Top_Label,View_Bottom_Label,Drawing_Note
+BLD,building_dimensions,,,Building Dimensions,,1,Footprint Width (interior),—,360,0,—,—,—,MISC,MISC,,—,—,—,—,—,—,—,—,,,,,,,,,,,,Fixture footprint
+BLD,building_dimensions,,,Building Dimensions,,2,Footprint Depth,—,480,0,—,—,—,MISC,MISC,,—,—,—,—,—,—,—,—,,,,,,,,,,,,Fixture depth
+BLD,building_dimensions,,,Building Dimensions,,3,Floor to Floor Height,—,132,0,—,—,—,MISC,MISC,,—,—,—,—,—,—,—,—,,,,,,,,,,,,Fixture F2F
+BLD,building_dimensions,,,Building Dimensions,,4,Void Clear Width,—,53,0,—,—,—,MISC,MISC,,—,—,—,—,—,—,—,—,,,,,,,,,,,,Fixture void
+BLD,building_dimensions,,,Building Dimensions,,5,Stair Width,—,48,0,—,—,—,MISC,MISC,,—,—,—,—,—,—,—,—,,,,,,,,,,,,Fixture stair
+BLD,building_dimensions,,,Building Dimensions,,6,Section Scale px/in,—,1.4,0,—,—,—,MISC,MISC,,—,—,—,—,—,—,—,—,,,,,,,,,,,,Fixture section scale
+BLD,building_dimensions,,,Building Dimensions,,7,Plan Scale px/in,—,1.2,0,—,—,—,MISC,MISC,,—,—,—,—,—,—,—,—,,,,,,,,,,,,Fixture plan scale
+BLD,building_dimensions,,,Building Dimensions,,8,Diagram Section Ref Width,—,618,0,,,,MISC,MISC,none,,,,,,,,,,,,,,,,,,,,Ref width
+BLD,building_dimensions,,,Building Dimensions,,9,Diagram Section Ref Height,—,700,0,,,,MISC,MISC,none,,,,,,,,,,,,,,,,,,,,Ref height
+BLD,building_dimensions,,,Building Dimensions,,10,Plan Ref Width,—,432,0,,,,MISC,MISC,none,,,,,,,,,,,,,,,,,,,,Plan ref W
+BLD,building_dimensions,,,Building Dimensions,,11,Plan Ref Height,—,576,0,,,,MISC,MISC,none,,,,,,,,,,,,,,,,,,,,Plan ref H
+BLD,building_dimensions,,,Building Dimensions,,12,Configuration,—,0,0,,,,MISC,MISC,none,,,,,,,,,exterior_wall_assembly,WALL-01,,,,,,,,,,Primary wall thickness ref
+BLD,building_dimensions,,,Building Dimensions,,13,Configuration,—,0,0,,,,MISC,MISC,none,,,,,,,,,structural_clt_core,WALL-01,,,,,,,,,,Core CLT ref
+BLD,building_dimensions,,,Building Dimensions,,14,Configuration,—,0,0,,,,MISC,MISC,none,,,,,,,,,interior_partition,WALL-01,,,,,,,,,,Partition ref
+BLD,building_dimensions,,,Building Dimensions,,15,Configuration,—,0,0,,,,MISC,MISC,none,,,,,,,,,balcony_assembly,ROOF-99,,,,,,,,,,Balcony ref
+BLD,building_dimensions,,,Building Dimensions,,16,Configuration,—,0,0,,,,MISC,MISC,none,,,,,,,,,system_id_prefix,PFX-,,,,,,,,,,Next-ID prefix
+ROOF-99,demo_roof_stack,typical,roof_exterior_to_interior,Demo Roof Stack,A,1,Roof Membrane,EPDM,0.5,0,x,x,N/A,MEMBRANE,MISC,,,,,48,,,,,,2,ROOF DEMO,p-MISC,[],[],ROOF,0,↑ EXTERIOR,INTERIOR ↓,Fixture roof layer
+ROOF-99,demo_roof_stack,typical,roof_exterior_to_interior,Demo Roof Stack,A,TOTAL,—,—,0.5,0,—,—,—,—,,,—,—,—,—,—,,,,,,,,,,,,,,,—
+WALL-01,demo_wall_stack,typical,wall_interior_to_exterior,Demo Wall Stack,A,1,CLT Core,Structural CLT,6,6,x,x,N/A,CLT,CLT,,6,1.5,2.5,,48,,,,,,1,WALL DEMO,p-CLT,[],[],WALL,0,,,Fixture wall layer
+WALL-01,demo_wall_stack,typical,wall_interior_to_exterior,Demo Wall Stack,A,TOTAL,—,—,6,6,—,—,—,—,,,—,—,—,—,—,,,,,,,,,,,,,,,—

@@ -1,0 +1,314 @@
+import { useMemo, useState } from 'react'
+import type { CategoryId, SystemData } from '../types/system'
+import { CATEGORY_LABELS } from '../types/system'
+import { cn } from '../lib/utils'
+import { DISCIPLINES, getDisciplineFromSystemId } from '../data/disciplines'
+
+const SUB_CATEGORY_ORDER: CategoryId[] = ['A', 'B', 'C', 'D']
+
+interface SidebarProps {
+  orderedSystems: SystemData[]
+  selectedPageIndex: number
+  onSelect: (system: SystemData) => void
+  onSelectPage: (index: number) => void
+  onOpenSearch?: () => void
+}
+
+export function Sidebar({ orderedSystems, selectedPageIndex, onSelect, onSelectPage, onOpenSearch }: SidebarProps) {
+  // Default: A (Architectural) open, others collapsed
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
+    const c: Record<string, boolean> = {}
+    for (const d of DISCIPLINES) c[d.code] = d.code !== 'A'
+    return c
+  })
+  const [subCollapsed, setSubCollapsed] = useState<Record<string, boolean>>({})
+
+  const toggle = (code: string) => {
+    setCollapsed(prev => ({ ...prev, [code]: !prev[code] }))
+  }
+  const toggleSub = (key: string) => {
+    setSubCollapsed(prev => ({ ...prev, [key]: !prev[key] }))
+  }
+
+  // Group systems by discipline (A4-01 → A, etc.)
+  const systemsByDiscipline = useMemo(() => {
+    const map = new Map<string, SystemData[]>()
+    for (const sys of orderedSystems) {
+      const code = getDisciplineFromSystemId(sys.id)
+      if (!map.has(code)) map.set(code, [])
+      map.get(code)!.push(sys)
+    }
+    return map
+  }, [orderedSystems])
+
+  return (
+    <aside className="w-60 shrink-0 flex flex-col border-r border-border bg-white overflow-hidden">
+      {/* Sidebar header */}
+      <div className="px-4 py-3 border-b border-border space-y-2">
+        <div>
+          <p className="font-mono text-[9px] tracking-[0.2em] text-muted-foreground uppercase">
+            Mass Timber Building System
+          </p>
+          <p className="font-mono text-[11px] font-bold tracking-widest text-foreground mt-0.5 uppercase">
+            Systems Index
+          </p>
+        </div>
+        {onOpenSearch && (
+          <button
+            type="button"
+            onClick={onOpenSearch}
+            className={cn(
+              'w-full flex items-center gap-2 px-2.5 py-1.5 rounded-sm border border-border',
+              'font-mono text-[9px] tracking-wide text-muted-foreground text-left',
+              'hover:bg-muted hover:text-foreground transition-colors',
+            )}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" className="shrink-0 opacity-70" aria-hidden>
+              <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
+              <path d="M20 20l-4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+            <span className="flex-1 truncate">Search pages & data…</span>
+            <kbd className="hidden sm:inline font-mono text-[8px] px-1 py-0.5 border border-border bg-muted/50 text-muted-foreground shrink-0" title="Ctrl+K on Windows/Linux">
+              ⌘K
+            </kbd>
+          </button>
+        )}
+      </div>
+
+      {/* Scrollable nav */}
+      <nav className="flex-1 overflow-y-auto scrollbar-thin py-2">
+        {/* Composite pages: A3 Building Section, A1 Building Plan (per sheet prefix standards) */}
+        <div className="space-y-0">
+          <button
+            onClick={() => onSelectPage(0)}
+            className={cn(
+              'w-full flex items-start gap-2.5 px-4 py-2 text-left',
+              'border-l-2 transition-colors duration-75',
+              selectedPageIndex === 0
+                ? 'border-l-foreground bg-muted'
+                : 'border-l-transparent hover:bg-muted/60',
+            )}
+          >
+            <span className={cn(
+              'font-mono text-[9px] font-bold tracking-wider shrink-0 mt-0.5',
+              'inline-flex items-center justify-center min-w-[2rem] h-4 px-1',
+              'border',
+              selectedPageIndex === 0
+                ? 'border-foreground text-foreground'
+                : 'border-border text-muted-foreground',
+            )}>
+              A3
+            </span>
+            <span className={cn(
+              'font-mono text-[9px] leading-tight',
+              selectedPageIndex === 0 ? 'text-foreground font-medium' : 'text-muted-foreground',
+            )}>
+              Building Section
+            </span>
+          </button>
+          <button
+            onClick={() => onSelectPage(1)}
+            className={cn(
+              'w-full flex items-start gap-2.5 px-4 py-2 text-left',
+              'border-l-2 transition-colors duration-75',
+              selectedPageIndex === 1
+                ? 'border-l-foreground bg-muted'
+                : 'border-l-transparent hover:bg-muted/60',
+            )}
+          >
+            <span className={cn(
+              'font-mono text-[9px] font-bold tracking-wider shrink-0 mt-0.5',
+              'inline-flex items-center justify-center min-w-[2rem] h-4 px-1',
+              'border',
+              selectedPageIndex === 1
+                ? 'border-foreground text-foreground'
+                : 'border-border text-muted-foreground',
+            )}>
+              A1
+            </span>
+            <span className={cn(
+              'font-mono text-[9px] leading-tight',
+              selectedPageIndex === 1 ? 'text-foreground font-medium' : 'text-muted-foreground',
+            )}>
+              Building Plan
+            </span>
+          </button>
+        </div>
+        <div className="h-px bg-border mx-4 my-1" aria-hidden />
+
+        {/* Discipline dropdowns - badge only in category header */}
+        {DISCIPLINES.map(({ code, label }) => {
+          const systems = systemsByDiscipline.get(code) ?? []
+          const isOpen = collapsed[code] !== true
+
+          return (
+            <div key={code}>
+              <button
+                onClick={() => toggle(code)}
+                className={cn(
+                  'w-full flex items-center justify-between',
+                  'px-4 py-2 text-left',
+                  'hover:bg-muted transition-colors duration-75',
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <span className={cn(
+                    'font-mono text-[10px] font-bold tracking-[0.15em]',
+                    'inline-flex items-center justify-center min-w-[1.5rem] h-5 px-1',
+                    'bg-foreground text-white',
+                  )}>
+                    {code}
+                  </span>
+                  <span className="font-mono text-[9px] tracking-wide text-muted-foreground uppercase">
+                    {label}
+                  </span>
+                </div>
+                <svg
+                  width="10" height="10" viewBox="0 0 10 10"
+                  className={cn(
+                    'text-muted-foreground transition-transform duration-150',
+                    isOpen ? 'rotate-180' : 'rotate-0',
+                  )}
+                >
+                  <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                </svg>
+              </button>
+
+              {/* System list - with sub-categories (A Architectural) and bordered badge for system ID */}
+              {isOpen && systems.length > 0 && (
+                <ul className="pb-1">
+                  {code === 'A' ? (
+                    // A Architectural: group by sub-category (Structural, Envelope, Interior, Special)
+                    SUB_CATEGORY_ORDER.map(catId => {
+                      const subSystems = systems
+                        .filter(s => s.category === catId)
+                        .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
+                      if (subSystems.length === 0) return null
+                      const subKey = `A-${catId}`
+                      const isSubOpen = subCollapsed[subKey] !== true
+                      return (
+                        <li key={catId}>
+                          <button
+                            onClick={() => toggleSub(subKey)}
+                            className={cn(
+                              'w-full flex items-center justify-between',
+                              'px-4 py-1.5 pl-6 text-left',
+                              'hover:bg-muted/60 transition-colors duration-75',
+                            )}
+                          >
+                            <span className="font-mono text-[8px] tracking-wide text-muted-foreground uppercase">
+                              {CATEGORY_LABELS[catId]}
+                            </span>
+                            <svg
+                              width="8" height="8" viewBox="0 0 10 10"
+                              className={cn(
+                                'text-muted-foreground transition-transform duration-150',
+                                isSubOpen ? 'rotate-180' : 'rotate-0',
+                              )}
+                            >
+                              <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                            </svg>
+                          </button>
+                          {isSubOpen && (
+                            <ul className="pb-1">
+                              {subSystems.map(sys => {
+                                const idx = orderedSystems.findIndex(s => s.id === sys.id)
+                                const systemPageIndex = idx >= 0 ? idx + 2 : -1
+                                const isSelected = selectedPageIndex === systemPageIndex
+                                return (
+                                  <li key={sys.id}>
+                                    <button
+                                      onClick={() => onSelect(sys)}
+                                      className={cn(
+                                        'w-full flex items-start gap-2.5 px-4 py-2 pl-8 text-left',
+                                        'border-l-2 transition-colors duration-75',
+                                        isSelected
+                                          ? 'border-l-foreground bg-muted'
+                                          : 'border-l-transparent hover:bg-muted/60',
+                                      )}
+                                    >
+                                      <span className={cn(
+                                        'font-mono text-[9px] font-bold tracking-wider shrink-0 mt-0.5',
+                                        'inline-flex items-center justify-center min-w-[2.75rem] h-4 px-1',
+                                        'border',
+                                        isSelected
+                                          ? 'border-foreground text-foreground'
+                                          : 'border-border text-muted-foreground',
+                                      )}>
+                                        {sys.id}
+                                      </span>
+                                      <span className={cn(
+                                        'font-mono text-[9px] leading-tight truncate',
+                                        isSelected ? 'text-foreground font-medium' : 'text-muted-foreground',
+                                      )}>
+                                        {sys.name}
+                                      </span>
+                                    </button>
+                                  </li>
+                                )
+                              })}
+                            </ul>
+                          )}
+                        </li>
+                      )
+                    })
+                  ) : (
+                    // Other disciplines: flat list with bordered badge
+                    [...systems]
+                      .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
+                      .map(sys => {
+                      const idx = orderedSystems.findIndex(s => s.id === sys.id)
+                      const systemPageIndex = idx >= 0 ? idx + 2 : -1
+                      const isSelected = selectedPageIndex === systemPageIndex
+                      return (
+                        <li key={sys.id}>
+                          <button
+                            onClick={() => onSelect(sys)}
+                            className={cn(
+                              'w-full flex items-start gap-2.5 px-4 py-2 pl-6 text-left',
+                              'border-l-2 transition-colors duration-75',
+                              isSelected
+                                ? 'border-l-foreground bg-muted'
+                                : 'border-l-transparent hover:bg-muted/60',
+                            )}
+                          >
+                            <span className={cn(
+                              'font-mono text-[9px] font-bold tracking-wider shrink-0 mt-0.5',
+                              'inline-flex items-center justify-center min-w-[2.75rem] h-4 px-1',
+                              'border',
+                              isSelected
+                                ? 'border-foreground text-foreground'
+                                : 'border-border text-muted-foreground',
+                            )}>
+                              {sys.id}
+                            </span>
+                            <span className={cn(
+                              'font-mono text-[9px] leading-tight truncate',
+                              isSelected ? 'text-foreground font-medium' : 'text-muted-foreground',
+                            )}>
+                              {sys.name}
+                            </span>
+                          </button>
+                        </li>
+                      )
+                    })
+                  )}
+                </ul>
+              )}
+            </div>
+          )
+        })}
+      </nav>
+
+      {/* Footer */}
+      <div className="px-4 py-2 border-t border-border">
+        <p className="font-mono text-[8px] text-muted-foreground tracking-wide uppercase">
+          Highland Park / Detroit, MI
+        </p>
+        <p className="font-mono text-[8px] text-muted-foreground tracking-wide">
+          ASHRAE Zone 5 — {orderedSystems.length} Systems
+        </p>
+      </div>
+    </aside>
+  )
+}
