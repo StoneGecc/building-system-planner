@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
-import type { SystemData } from '../types/system'
+import type { BuildingDimensions, SystemData } from '../types/system'
 import { SectionDrawing } from './SectionDrawing'
 import { cn } from '../lib/utils'
 
@@ -10,6 +10,7 @@ const ZOOM_STEP = 0.25
 interface DrawingCanvasProps {
   system: SystemData
   systemIndex: number
+  buildingDimensions: BuildingDimensions
   onOpenBulkEditWithLayer?: (systemId: string, layerIndex: number) => void
   className?: string
 }
@@ -34,7 +35,13 @@ function exportSVG(svgEl: SVGSVGElement, system: SystemData) {
   URL.revokeObjectURL(url)
 }
 
-export function DrawingCanvas({ system, systemIndex, onOpenBulkEditWithLayer, className }: DrawingCanvasProps) {
+export function DrawingCanvas({
+  system,
+  systemIndex,
+  buildingDimensions,
+  onOpenBulkEditWithLayer,
+  className,
+}: DrawingCanvasProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
   const [zoom, setZoom] = useState(1)
@@ -171,7 +178,7 @@ export function DrawingCanvas({ system, systemIndex, onOpenBulkEditWithLayer, cl
       {/* Drawing viewport — Ctrl/Cmd + scroll to zoom */}
       <div
         ref={viewportRef}
-        className="flex-1 overflow-auto bg-[#f0ede8] p-6"
+        className="flex-1 overflow-auto bg-[#f0ede8] pt-24 pl-24 pr-10 pb-12"
         style={{ overscrollBehavior: 'contain' }}
       >
         {/* Wrapper ensures scroll area = zoomed size; inline-block + text-align centers when zoomed out */}
@@ -196,6 +203,7 @@ export function DrawingCanvas({ system, systemIndex, onOpenBulkEditWithLayer, cl
               <SectionDrawing
                 system={system}
                 systemIndex={systemIndex}
+                buildingDimensions={buildingDimensions}
                 svgRef={svgRef as React.RefObject<SVGSVGElement>}
                 onOpenBulkEditWithLayer={onOpenBulkEditWithLayer}
               />

@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import type { SystemData } from './types/system'
 import { parseCSV, parseThickness } from './lib/csvParser'
 import { sortSystemsForDisplay } from './lib/systemSort'
@@ -11,8 +11,22 @@ import { CompositeView } from './components/CompositeView'
 import { BulkEditModal } from './components/BulkEditModal'
 import { ChatPanel } from './components/ChatPanel'
 import { ApplyChangesModal } from './components/ApplyChangesModal'
+import { ImplementationPlanView, cloneSketch } from './components/ImplementationPlanView'
+import { PAGE_IMPLEMENTATION_PLAN, SYSTEM_PAGE_OFFSET, systemPageIndex } from './data/pageIndices'
+import {
+  emptySketch,
+  footprintStorageKey,
+  type PlanLayoutSketch,
+  type PlanSketchCommitOptions,
+} from './types/planLayout'
+import { loadSketchFromLocalStorage, saveSketchToLocalStorage } from './lib/planLayoutStorage'
 // server.fs.allow: ['..'] is configured in vite.config.ts
 import csvRaw from '../../Building_Systems_Complete.csv?raw'
+
+const DATA_CSV_IMPORT = '../../Building_Systems_Complete.csv'
+const dataCsvFileName = decodeURIComponent(
+  new URL(DATA_CSV_IMPORT, import.meta.url).pathname.split('/').pop() || 'data.csv',
+)
 
 export default function App() {
   const [parseResult] = useMemo(() => [parseCSV(csvRaw)], [])
@@ -35,9 +49,9 @@ export default function App() {
     () => buildLayout(buildingDimensions, orderedSystems),
     [buildingDimensions, orderedSystems],
   )
-  const totalPages = orderedSystems.length + 2
+  const totalPages = orderedSystems.length + SYSTEM_PAGE_OFFSET
 
-  const [selectedPageIndex, setSelectedPageIndex] = useState(2)  // start on A1 (page 2)
+  const [selectedPageIndex, setSelectedPageIndex] = useState(SYSTEM_PAGE_OFFSET)  // first system sheet
   const [compositeZoom, setCompositeZoom] = useState(1)
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [highlightedLayerIndex, setHighlightedLayerIndex] = useState<number | null>(null)
@@ -45,13 +59,95 @@ export default function App() {
   const [proposedChanges, setProposedChanges] = useState<SystemData[] | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
 
-  const selectedSystem = selectedPageIndex >= 2 ? orderedSystems[selectedPageIndex - 2] : orderedSystems[0]
+  const selectedSystem =
+    selectedPageIndex >= SYSTEM_PAGE_OFFSET
+      ? orderedSystems[selectedPageIndex - SYSTEM_PAGE_OFFSET]
+      : orderedSystems[0]
   const showCompositeSection = selectedPageIndex === 0
   const showCompositePlan = selectedPageIndex === 1
+  const showImplementationPlan = selectedPageIndex === PAGE_IMPLEMENTATION_PLAN
+
+  const footprintKey = useMemo(() => footprintStorageKey(buildingDimensions), [buildingDimensions])
+
+  const [implSketch, setImplSketch] = useState<PlanLayoutSketch>(() => {
+    return loadSketchFromLocalStorage(parseResult.buildingDimensions) ?? emptySketch(12)
+  })
+  const [implUndoStack, setImplUndoStack] = useState<PlanLayoutSketch[]>([])
+  const [implRedoStack, setImplRedoStack] = useState<PlanLayoutSketch[]>([])
+  const implSketchRef = useRef(implSketch)
+  const implUndoStackRef = useRef(implUndoStack)
+  const implRedoStackRef = useRef(implRedoStack)
+  implSketchRef.current = implSketch
+  implUndoStackRef.current = implUndoStack
+  implRedoStackRef.current = implRedoStack
+
+  const HISTORY_CAP = 50
+
+  useEffect(() => {
+    const loaded = loadSketchFromLocalStorage(buildingDimensions)
+    const next = loaded ?? emptySketch(12)
+    setImplSketch(next)
+    implSketchRef.current = next
+    setImplUndoStack([])
+    implUndoStackRef.current = []
+    setImplRedoStack([])
+    implRedoStackRef.current = []
+  }, [footprintKey])
+
+  const commitImplSketch = useCallback((next: PlanLayoutSketch, opts?: PlanSketchCommitOptions) => {
+    if (!opts?.skipUndo) {
+      setImplUndoStack((stack) => {
+        const pushed = [...stack.slice(-(HISTORY_CAP - 1)), cloneSketch(implSketchRef.current)]
+        implUndoStackRef.current = pushed
+        return pushed
+      })
+      setImplRedoStack([])
+      implRedoStackRef.current = []
+    }
+    implSketchRef.current = next
+    setImplSketch(next)
+  }, [])
+
+  const undoImplSketch = useCallback(() => {
+    const stack = implUndoStackRef.current
+    if (stack.length === 0) return
+    const snap = stack[stack.length - 1]!
+    const nextUndo = stack.slice(0, -1)
+    const current = cloneSketch(implSketchRef.current)
+    const nextRedo = [...implRedoStackRef.current.slice(-(HISTORY_CAP - 1)), current]
+    implUndoStackRef.current = nextUndo
+    implRedoStackRef.current = nextRedo
+    setImplUndoStack(nextUndo)
+    setImplRedoStack(nextRedo)
+    implSketchRef.current = snap
+    setImplSketch(snap)
+  }, [])
+
+  const redoImplSketch = useCallback(() => {
+    const rstack = implRedoStackRef.current
+    if (rstack.length === 0) return
+    const snap = rstack[rstack.length - 1]!
+    const nextRedo = rstack.slice(0, -1)
+    const current = cloneSketch(implSketchRef.current)
+    const nextUndo = [...implUndoStackRef.current.slice(-(HISTORY_CAP - 1)), current]
+    implUndoStackRef.current = nextUndo
+    implRedoStackRef.current = nextRedo
+    setImplUndoStack(nextUndo)
+    setImplRedoStack(nextRedo)
+    implSketchRef.current = snap
+    setImplSketch(snap)
+  }, [])
+
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      saveSketchToLocalStorage(buildingDimensions, implSketch)
+    }, 400)
+    return () => clearTimeout(t)
+  }, [buildingDimensions, implSketch])
 
   function handleSelectSystem(system: SystemData) {
     const idx = orderedSystems.findIndex(s => s.id === system.id)
-    setSelectedPageIndex(idx >= 0 ? idx + 2 : 2)
+    setSelectedPageIndex(idx >= 0 ? systemPageIndex(idx) : SYSTEM_PAGE_OFFSET)
   }
 
   function handleSelectPage(index: number) {
@@ -87,6 +183,35 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
+  // ⌘Z / Ctrl+Z — undo · ⌘⇧Z / Ctrl+Shift+Z or Ctrl+Y — redo (implementation plan only)
+  useEffect(() => {
+    if (selectedPageIndex !== PAGE_IMPLEMENTATION_PLAN) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      const t = e.target
+      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement) {
+        return
+      }
+      if (t instanceof HTMLElement && t.isContentEditable) return
+      const mod = e.metaKey || e.ctrlKey
+      if (mod && e.key === 'z' && e.shiftKey) {
+        e.preventDefault()
+        redoImplSketch()
+        return
+      }
+      if (mod && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        undoImplSketch()
+        return
+      }
+      if (e.ctrlKey && !e.metaKey && e.key === 'y') {
+        e.preventDefault()
+        redoImplSketch()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [selectedPageIndex, undoImplSketch, redoImplSketch])
+
   return (
     <div className="flex h-screen overflow-hidden bg-background">
       {/* Sidebar navigation */}
@@ -118,7 +243,7 @@ export default function App() {
               <div className="flex items-center gap-3">
                 <div className="w-2 h-2 bg-foreground" />
                 <span className="font-mono text-[11px] tracking-[0.25em] font-bold uppercase text-foreground">
-                  Mass Timber Building System
+                  {dataCsvFileName}
                 </span>
                 <span className="font-mono text-[9px] tracking-wider text-muted-foreground uppercase">
                   Highland Park / Detroit
@@ -134,7 +259,7 @@ export default function App() {
                   className={[
                     'inline-flex items-center gap-1.5 px-3 py-1.5',
                     'border border-gray-300 text-foreground bg-white',
-                    'font-mono text-[10px] tracking-widest uppercase',
+                    'font-mono text-[10px] tracking-wide',
                     'hover:bg-foreground hover:text-white hover:border-foreground',
                     'transition-colors duration-100',
                   ].join(' ')}
@@ -145,7 +270,7 @@ export default function App() {
                     <line x1="3" y1="9" x2="21" y2="9" />
                     <line x1="9" y1="21" x2="9" y2="9" />
                   </svg>
-                  Edit Data
+                  Data
                 </button>
                 <button
                   onClick={() => setChatOpen(true)}
@@ -168,7 +293,7 @@ export default function App() {
                   className={[
                     'inline-flex items-center gap-1.5 px-3 py-1.5',
                     'border border-foreground text-foreground bg-white',
-                    'font-mono text-[10px] tracking-widest uppercase',
+                    'font-mono text-[10px] tracking-wide',
                     'hover:bg-foreground hover:text-white',
                     'transition-colors duration-100',
                   ].join(' ')}
@@ -179,7 +304,7 @@ export default function App() {
                     <polyline points="7 10 12 15 17 10" />
                     <line x1="12" y1="15" x2="12" y2="3" />
                   </svg>
-                  Export All
+                  Export
                 </button>
               </div>
             </header>
@@ -191,25 +316,23 @@ export default function App() {
               onZoomChange={setCompositeZoom}
               onSelectSystem={(system) => {
                 const idx = orderedSystems.findIndex(s => s.id === system.id)
-                setSelectedPageIndex(idx >= 0 ? idx + 2 : 2)
+                setSelectedPageIndex(idx >= 0 ? systemPageIndex(idx) : SYSTEM_PAGE_OFFSET)
               }}
               className="flex-1 overflow-hidden"
             />
           </>
-        ) : (
+        ) : showImplementationPlan ? (
           <>
-            {/* Top bar */}
             <header className="flex items-center justify-between px-5 py-2.5 min-h-[50px] border-b border-border bg-white shrink-0">
               <div className="flex items-center gap-3">
                 <div className="w-2 h-2 bg-foreground" />
                 <span className="font-mono text-[11px] tracking-[0.25em] font-bold uppercase text-foreground">
-                  Mass Timber Building System
+                  {dataCsvFileName}
                 </span>
                 <span className="font-mono text-[9px] tracking-wider text-muted-foreground uppercase">
                   Highland Park / Detroit
                 </span>
               </div>
-
               <div className="flex items-center gap-3">
                 <span className="font-mono text-[9px] tracking-widest text-muted-foreground uppercase">
                   {String(selectedPageIndex).padStart(2, '0')} / {totalPages} Sheets
@@ -220,7 +343,7 @@ export default function App() {
                   className={[
                     'inline-flex items-center gap-1.5 px-3 py-1.5',
                     'border border-gray-300 text-foreground bg-white',
-                    'font-mono text-[10px] tracking-widest uppercase',
+                    'font-mono text-[10px] tracking-wide',
                     'hover:bg-foreground hover:text-white hover:border-foreground',
                     'transition-colors duration-100',
                   ].join(' ')}
@@ -231,7 +354,7 @@ export default function App() {
                     <line x1="3" y1="9" x2="21" y2="9" />
                     <line x1="9" y1="21" x2="9" y2="9" />
                   </svg>
-                  Edit Data
+                  Data
                 </button>
                 <button
                   onClick={() => setChatOpen(true)}
@@ -254,7 +377,7 @@ export default function App() {
                   className={[
                     'inline-flex items-center gap-1.5 px-3 py-1.5',
                     'border border-foreground text-foreground bg-white',
-                    'font-mono text-[10px] tracking-widest uppercase',
+                    'font-mono text-[10px] tracking-wide',
                     'hover:bg-foreground hover:text-white',
                     'transition-colors duration-100',
                   ].join(' ')}
@@ -265,7 +388,92 @@ export default function App() {
                     <polyline points="7 10 12 15 17 10" />
                     <line x1="12" y1="15" x2="12" y2="3" />
                   </svg>
-                  Export All
+                  Export
+                </button>
+              </div>
+            </header>
+            <ImplementationPlanView
+              buildingDimensions={buildingDimensions}
+              orderedSystems={orderedSystems}
+              sketch={implSketch}
+              onSketchChange={commitImplSketch}
+              onUndo={undoImplSketch}
+              canUndo={implUndoStack.length > 0}
+              onRedo={redoImplSketch}
+              canRedo={implRedoStack.length > 0}
+              className="flex-1 min-h-0"
+            />
+          </>
+        ) : (
+          <>
+            {/* Top bar */}
+            <header className="flex items-center justify-between px-5 py-2.5 min-h-[50px] border-b border-border bg-white shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-2 h-2 bg-foreground" />
+                <span className="font-mono text-[11px] tracking-[0.25em] font-bold uppercase text-foreground">
+                  {dataCsvFileName}
+                </span>
+                <span className="font-mono text-[9px] tracking-wider text-muted-foreground uppercase">
+                  Highland Park / Detroit
+                </span>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <span className="font-mono text-[9px] tracking-widest text-muted-foreground uppercase">
+                  {String(selectedPageIndex).padStart(2, '0')} / {totalPages} Sheets
+                </span>
+                <div className="w-px h-4 bg-border" />
+                <button
+                  onClick={() => { setHighlightedLayerIndex(null); setBulkEditOpen(true) }}
+                  className={[
+                    'inline-flex items-center gap-1.5 px-3 py-1.5',
+                    'border border-gray-300 text-foreground bg-white',
+                    'font-mono text-[10px] tracking-wide',
+                    'hover:bg-foreground hover:text-white hover:border-foreground',
+                    'transition-colors duration-100',
+                  ].join(' ')}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                    <line x1="3" y1="9" x2="21" y2="9" />
+                    <line x1="9" y1="21" x2="9" y2="9" />
+                  </svg>
+                  Data
+                </button>
+                <button
+                  onClick={() => setChatOpen(true)}
+                  className={[
+                    'inline-flex items-center gap-1.5 px-3 py-1.5',
+                    'border border-gray-300 text-foreground bg-white',
+                    'font-mono text-[10px] tracking-widest uppercase',
+                    'hover:bg-foreground hover:text-white hover:border-foreground',
+                    'transition-colors duration-100',
+                  ].join(' ')}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                  </svg>
+                  AI
+                </button>
+                <button
+                  onClick={() => exportAllSheets(orderedSystems, layout, buildingDimensions).catch(err => alert('Export failed: ' + (err instanceof Error ? err.message : String(err))))}
+                  className={[
+                    'inline-flex items-center gap-1.5 px-3 py-1.5',
+                    'border border-foreground text-foreground bg-white',
+                    'font-mono text-[10px] tracking-wide',
+                    'hover:bg-foreground hover:text-white',
+                    'transition-colors duration-100',
+                  ].join(' ')}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
+                  Export
                 </button>
               </div>
             </header>
@@ -274,6 +482,7 @@ export default function App() {
             <DrawingCanvas
               system={selectedSystem}
               systemIndex={selectedPageIndex}
+              buildingDimensions={buildingDimensions}
               onOpenBulkEditWithLayer={(_, layerIndex) => {
                 setHighlightedLayerIndex(layerIndex)
                 setBulkEditOpen(true)

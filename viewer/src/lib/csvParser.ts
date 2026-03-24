@@ -3,14 +3,20 @@ import {
   type LayerType,
   type SystemData,
   type CategoryGroup,
-  type CategoryId,
   type BuildingDimensions,
   type LayoutRefs,
   type Orientation,
-  CATEGORY_LABELS,
 } from '../types/system'
 import { inferFastenerIcon, normalizeFastenerIcon } from './fastenerIcons'
+import {
+  parseDiagramDetailLevel,
+  parseDrawFastenerGraphics,
+  parsePositiveInt,
+  parseTriBool,
+} from './diagramDetail'
+import type { DiagramDetailLevel } from '../types/system'
 import { DEFAULT_LAYOUT_REFS } from '../data/schematicFrame'
+import { splitCsvLine } from './csvSplit'
 
 const VALID_LAYER_TYPES = new Set<LayerType>([
   'CLT', 'WOOD', 'INSULATION', 'MEMBRANE', 'METAL',
@@ -59,26 +65,6 @@ export function formatThickness(inches: number): string {
     inStr = match ? (inWhole > 0 ? `${inWhole}-${match[1]}` : match[1]) : inRem.toFixed(2)
   }
   return ft > 0 ? `${ft}'-${inStr}"` : `${inStr}"`
-}
-
-function parseRow(line: string): string[] {
-  const fields: string[] = []
-  let current = ''
-  let inQuotes = false
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]
-    if (ch === '"') {
-      if (inQuotes && line[i + 1] === '"') { current += '"'; i++ }
-      else inQuotes = !inQuotes
-    } else if (ch === ',' && !inQuotes) {
-      fields.push(current.trim())
-      current = ''
-    } else {
-      current += ch
-    }
-  }
-  fields.push(current.trim())
-  return fields
 }
 
 type DimKey =
@@ -137,7 +123,7 @@ export interface ParseResult {
 export function parseCSV(raw: string): ParseResult {
   const lines = raw.split('\n').filter((l) => l.trim())
   const [headerLine, ...dataLines] = lines
-  const headers = parseRow(headerLine)
+  const headers = splitCsvLine(headerLine)
 
   const idx = (name: string) => headers.indexOf(name)
   const col = (name: string) => {
@@ -147,7 +133,7 @@ export function parseCSV(raw: string): ParseResult {
 
   const systemMap = new Map<string, string[][]>()
   for (const line of dataLines) {
-    const row = parseRow(line)
+    const row = splitCsvLine(line)
     const sysId = row[idx('System_ID')]
     if (!sysId) continue
     if (!systemMap.has(sysId)) systemMap.set(sysId, [])
@@ -169,6 +155,10 @@ export function parseCSV(raw: string): ParseResult {
 
   const layoutRefs: LayoutRefs = { ...DEFAULT_LAYOUT_REFS }
   let systemIdPrefix = 'A4-'
+  let defaultDiagramDetailLevel: DiagramDetailLevel | undefined
+  let detailMaxModuleJointsBld: number | undefined
+  let detailMinFeaturePxBld: number | undefined
+  let shopMaxFastenerMarksPerLayerBld: number | undefined
 
   const bldRows = systemMap.get('BLD')
   if (bldRows) {
@@ -177,7 +167,19 @@ export function parseCSV(raw: string): ParseResult {
       const cv = (row[col('Config_Value')] ?? '').trim()
       if (ck && cv) {
         if (ck === 'system_id_prefix') systemIdPrefix = cv
-        else if (LAYOUT_CONFIG_KEYS.has(ck)) {
+        else if (ck === 'default_diagram_detail_level') {
+          const p = parseDiagramDetailLevel(cv)
+          if (p !== undefined) defaultDiagramDetailLevel = p
+        } else if (ck === 'detail_max_module_joints') {
+          const n = parseInt(cv.trim(), 10)
+          if (Number.isFinite(n) && n >= 0) detailMaxModuleJointsBld = n
+        } else if (ck === 'detail_min_feature_px') {
+          const n = parseInt(cv.trim(), 10)
+          if (Number.isFinite(n) && n > 0) detailMinFeaturePxBld = n
+        } else if (ck === 'shop_max_fastener_marks_per_layer') {
+          const n = parseInt(cv.trim(), 10)
+          if (Number.isFinite(n) && n > 0) shopMaxFastenerMarksPerLayerBld = n
+        } else if (LAYOUT_CONFIG_KEYS.has(ck)) {
           (layoutRefs as unknown as Record<string, string>)[ck] = cv
         }
         continue
@@ -198,6 +200,18 @@ export function parseCSV(raw: string): ParseResult {
   const vrCol = col('View_Reverse')
   const vtlCol = col('View_Top_Label')
   const vblCol = col('View_Bottom_Label')
+  const diagramDetailLevelCol = col('Diagram_Detail_Level')
+  const drawModCol = col('Draw_Module_Joints')
+  const drawCtrlCol = col('Draw_Control_Joints')
+  const drawFastCol = col('Draw_Fastener_Graphics')
+  const maxModJointCol = col('Detail_Max_Module_Joints')
+  const minFeatPxCol = col('Detail_Min_Feature_Px')
+  const fspCol = col('Fastener_Spacing_OC_in')
+  const fpCol = col('Fastener_Pattern')
+  const tmCol = col('Typ_Module_Width_in')
+  const esCol = col('Element_Spacing_OC_in')
+  const cavCol = col('Cavity_Depth_in')
+  const cjCol = col('Control_Joint_Spacing_ft')
 
   for (const [sysId, rows] of systemMap) {
     if (sysId === 'BLD') continue
@@ -206,20 +220,35 @@ export function parseCSV(raw: string): ParseResult {
     const sysName = meta[idx('System_Name')] ?? sysId
     const categoryCol = headers.includes('Category') ? idx('Category') : -1
     const rawCategory = categoryCol >= 0 ? meta[categoryCol]?.trim() : ''
-    const category: CategoryId =
-      rawCategory === 'A' || rawCategory === 'B' || rawCategory === 'C' || rawCategory === 'D'
-        ? (rawCategory as CategoryId)
-        : 'A'
+    const category = rawCategory || 'Uncategorized'
 
     const stCol = col('System_Type')
     const locCol = col('Location')
     const sdCol = col('Stack_Direction')
+    const pdlCol = col('Plan_Draw_Layers')
+    const planDrawLayers =
+      pdlCol >= 0
+        ? (meta[pdlCol] ?? '')
+            .split(/[;,\s]+/)
+            .map((t) => t.trim().toLowerCase())
+            .filter(
+              (t) =>
+                t === 'wall' ||
+                t === 'floor' ||
+                t === 'window' ||
+                t === 'door' ||
+                t === 'roof' ||
+                t === 'stairs' ||
+                t === 'column',
+            )
+        : []
     const metaExtras =
-      stCol >= 0 || locCol >= 0 || sdCol >= 0
+      stCol >= 0 || locCol >= 0 || sdCol >= 0 || planDrawLayers.length > 0
         ? {
             ...(stCol >= 0 ? { systemType: (meta[stCol] ?? '').trim() } : {}),
             ...(locCol >= 0 ? { location: (meta[locCol] ?? '').trim() } : {}),
             ...(sdCol >= 0 ? { stackDirection: (meta[sdCol] ?? '').trim() } : {}),
+            ...(planDrawLayers.length > 0 ? { planDrawLayers } : {}),
           }
         : {}
 
@@ -239,6 +268,9 @@ export function parseCSV(raw: string): ParseResult {
     const viewReverse = vrRaw === '1' || vrRaw.toLowerCase() === 'true'
     const viewTopLabel = vtlCol >= 0 ? (meta[vtlCol] ?? '').trim() || undefined : undefined
     const viewBottomLabel = vblCol >= 0 ? (meta[vblCol] ?? '').trim() || undefined : undefined
+    const diagramDetailLevelRaw =
+      diagramDetailLevelCol >= 0 ? (meta[diagramDetailLevelCol] ?? '').trim() : ''
+    const diagramDetailLevelParsed = parseDiagramDetailLevel(diagramDetailLevelRaw)
 
     const layers: Layer[] = []
     let totalThickness = '—'
@@ -268,6 +300,18 @@ export function parseCSV(raw: string): ParseResult {
           ? normalizeFastenerIcon(rawFi)
           : inferFastenerIcon(row[idx('Fastener')] ?? '', row[idx('Fastener_Size')] ?? '')
 
+      const fastenerSpacingOcIn = fspCol >= 0 ? (row[fspCol] ?? '').trim() || undefined : undefined
+      const fastenerPattern = fpCol >= 0 ? (row[fpCol] ?? '').trim() || undefined : undefined
+      const typModuleWidthIn = tmCol >= 0 ? (row[tmCol] ?? '').trim() || undefined : undefined
+      const elementSpacingOcIn = esCol >= 0 ? (row[esCol] ?? '').trim() || undefined : undefined
+      const cavityDepthIn = cavCol >= 0 ? (row[cavCol] ?? '').trim() || undefined : undefined
+      const controlJointSpacingFt = cjCol >= 0 ? (row[cjCol] ?? '').trim() || undefined : undefined
+      const drawModuleJoints = drawModCol >= 0 ? parseTriBool(row[drawModCol]) : undefined
+      const drawControlJoints = drawCtrlCol >= 0 ? parseTriBool(row[drawCtrlCol]) : undefined
+      const drawFastenerGraphics = drawFastCol >= 0 ? parseDrawFastenerGraphics(row[drawFastCol]) : undefined
+      const detailMaxModuleJoints = maxModJointCol >= 0 ? parsePositiveInt(row[maxModJointCol]) : undefined
+      const detailMinFeaturePx = minFeatPxCol >= 0 ? parsePositiveInt(row[minFeatPxCol]) : undefined
+
       layers.push({
         index: layerCount,
         name: row[idx('Layer')] ?? '',
@@ -278,8 +322,19 @@ export function parseCSV(raw: string): ParseResult {
         fastener: row[idx('Fastener')] ?? '',
         fastenerSize: row[idx('Fastener_Size')] ?? '',
         fastenerIcon,
+        ...(fastenerSpacingOcIn ? { fastenerSpacingOcIn } : {}),
         fastenerMinEdgeIn: (row[idx('Min_Edge_Dist_in')] ?? '').trim() || undefined,
         fastenerMinEndIn: (row[idx('Min_End_Dist_in')] ?? '').trim() || undefined,
+        ...(fastenerPattern ? { fastenerPattern } : {}),
+        ...(typModuleWidthIn ? { typModuleWidthIn } : {}),
+        ...(elementSpacingOcIn ? { elementSpacingOcIn } : {}),
+        ...(cavityDepthIn ? { cavityDepthIn } : {}),
+        ...(controlJointSpacingFt ? { controlJointSpacingFt } : {}),
+        ...(drawModuleJoints !== undefined ? { drawModuleJoints } : {}),
+        ...(drawControlJoints !== undefined ? { drawControlJoints } : {}),
+        ...(drawFastenerGraphics ? { drawFastenerGraphics } : {}),
+        ...(detailMaxModuleJoints !== undefined ? { detailMaxModuleJoints } : {}),
+        ...(detailMinFeaturePx !== undefined ? { detailMinFeaturePx } : {}),
         layerType,
         fill,
         notes: row[idx('Drawing_Note')] ?? '',
@@ -304,6 +359,7 @@ export function parseCSV(raw: string): ParseResult {
       ...(vrCol >= 0 ? { viewReverse } : {}),
       ...(viewTopLabel ? { viewTopLabel } : {}),
       ...(viewBottomLabel ? { viewBottomLabel } : {}),
+      ...(diagramDetailLevelParsed !== undefined ? { diagramDetailLevel: diagramDetailLevelParsed } : {}),
     })
   }
 
@@ -329,16 +385,30 @@ export function parseCSV(raw: string): ParseResult {
     ...(dims.diagramSectionRefHeight !== undefined ? { diagramSectionRefHeight: dims.diagramSectionRefHeight } : {}),
     ...(dims.planRefWidth !== undefined ? { planRefWidth: dims.planRefWidth } : {}),
     ...(dims.planRefHeight !== undefined ? { planRefHeight: dims.planRefHeight } : {}),
+    ...(defaultDiagramDetailLevel !== undefined ? { defaultDiagramDetailLevel } : {}),
+    ...(detailMaxModuleJointsBld !== undefined ? { detailMaxModuleJoints: detailMaxModuleJointsBld } : {}),
+    ...(detailMinFeaturePxBld !== undefined ? { detailMinFeaturePx: detailMinFeaturePxBld } : {}),
+    ...(shopMaxFastenerMarksPerLayerBld !== undefined
+      ? { shopMaxFastenerMarksPerLayer: shopMaxFastenerMarksPerLayerBld }
+      : {}),
   }
 
   return { systems, buildingDimensions }
 }
 
 export function groupByCategory(systems: SystemData[]): CategoryGroup[] {
-  const order: CategoryId[] = ['A', 'B', 'C', 'D']
-  return order.map((catId) => ({
-    id: catId,
-    label: CATEGORY_LABELS[catId],
-    systems: systems.filter((s) => s.category === catId),
+  const seen = new Set<string>()
+  const order: string[] = []
+  for (const s of systems) {
+    const c = s.category || 'Uncategorized'
+    if (!seen.has(c)) {
+      seen.add(c)
+      order.push(c)
+    }
+  }
+  return order.map((id) => ({
+    id,
+    label: id,
+    systems: systems.filter((s) => (s.category || 'Uncategorized') === id),
   }))
 }

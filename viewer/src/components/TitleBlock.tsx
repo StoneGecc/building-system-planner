@@ -1,5 +1,3 @@
-import type { CategoryId } from '../types/system'
-
 interface TitleBlockProps {
   x: number
   y: number
@@ -12,25 +10,11 @@ interface TitleBlockProps {
   systemIndex: number
   totalSystems: number
   scaleLabel?: string
-  /** When provided, used for category label; otherwise inferred from systemId */
-  category?: CategoryId
+  /** From CSV `Category`; shown on title block (uppercased). */
+  category?: string
 }
 
 const MONO = "'Courier New', Courier, monospace"
-
-function inferCategoryFromSystemId(systemId: string): string {
-  const match = systemId.match(/A4-(\d+)/)
-  if (match) {
-    const n = parseInt(match[1], 10)
-    if (n === 23) return 'C'
-    if (n >= 1 && n <= 5) return 'A'
-    if (n >= 6 && n <= 8) return 'B'
-    if (n >= 9 && n <= 12) return 'C'
-    if (n >= 13 && n <= 18) return 'D'
-    if (n >= 19 && n <= 22) return 'A'
-  }
-  return systemId[0] ?? 'A'
-}
 
 export function TitleBlock({
   x, y, w, h,
@@ -40,15 +24,10 @@ export function TitleBlock({
   scaleLabel = '3" = 1\'-0"',
   category: categoryProp,
 }: TitleBlockProps) {
-  const category = categoryProp ?? inferCategoryFromSystemId(systemId)
-  const categoryLabels: Record<string, string> = {
-    '0': 'COMPOSITE',
-    A: 'STRUCTURAL SYSTEM',
-    B: 'BUILDING ENVELOPE',
-    C: 'INTERIOR SYSTEM',
-    D: 'SPECIAL / PROJECT',
-  }
-  const catLabel = categoryLabels[category] ?? 'BUILDING SYSTEM'
+  const raw = categoryProp?.trim() ?? ''
+  const catLabel = raw
+    ? (raw.length > 44 ? `${raw.slice(0, 42)}…` : raw).toUpperCase()
+    : 'BUILDING SYSTEM'
 
   const ruleH = 0.5
   const padX = 8

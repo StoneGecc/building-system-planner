@@ -13,7 +13,7 @@ import { resolveFastenerIcon } from './fastenerIcons'
 import { calloutSystemIdsFromSystems } from './systemSort'
 
 const CSV_HEADER =
-  'System_ID,System_Type,Location,Stack_Direction,System_Name,Category,#,Layer,Material,Thickness_in,Approx_R_Value,Connection,Fastener,Fastener_Size,Layer_Type,Fill,Fastener_Icon,Fastener_Spacing_OC_in,Min_Edge_Dist_in,Min_End_Dist_in,Fastener_Pattern,Typ_Module_Width_in,Element_Spacing_OC_in,Cavity_Depth_in,Control_Joint_Spacing_ft,Config_Key,Config_Value,Sheet_Order,Diagram_Label,Diagram_Hatch,Diagram_Section_Zones_JSON,Diagram_Plan_Zones_JSON,View_Orientation,View_Reverse,View_Top_Label,View_Bottom_Label,Drawing_Note'
+  'System_ID,System_Type,Location,Stack_Direction,System_Name,Category,#,Layer,Material,Thickness_in,Approx_R_Value,Connection,Fastener,Fastener_Size,Layer_Type,Fill,Fastener_Icon,Fastener_Spacing_OC_in,Min_Edge_Dist_in,Min_End_Dist_in,Fastener_Pattern,Typ_Module_Width_in,Element_Spacing_OC_in,Cavity_Depth_in,Control_Joint_Spacing_ft,Draw_Module_Joints,Draw_Control_Joints,Draw_Fastener_Graphics,Detail_Max_Module_Joints,Detail_Min_Feature_Px,Config_Key,Config_Value,Sheet_Order,Diagram_Detail_Level,Diagram_Label,Diagram_Hatch,Diagram_Section_Zones_JSON,Diagram_Plan_Zones_JSON,View_Orientation,View_Reverse,View_Top_Label,View_Bottom_Label,Drawing_Note,Plan_Draw_Layers'
 
 const BLD_DIM_ROWS: Array<[string, keyof Pick<BuildingDimensions,
   'footprintWidth' | 'footprintDepth' | 'floorToFloor' | 'voidClearWidth' | 'stairWidth' | 'sectionScale' | 'planScale'
@@ -43,15 +43,16 @@ function escapeCsv(s: string): string {
   return s
 }
 
-/** Eleven columns before Drawing_Note: Config_Key … View_Bottom_Label */
+/** Config_Key … View_Bottom_Label (12 cells: ck, cv, sheet, diagram detail, diagram fields…) */
 function diagramMetaColumns(system: SystemData, layerIndex: number, isTotal: boolean): string[] {
   if (isTotal || layerIndex !== 1) {
-    return ['', '', '', '', '', '', '', '', '', '', '']
+    return Array(12).fill('') as string[]
   }
   return [
     '',
     '',
     system.sheetOrder !== undefined ? String(system.sheetOrder) : '',
+    system.diagramDetailLevel !== undefined ? String(system.diagramDetailLevel) : '',
     system.diagramLabel ?? '',
     system.diagramHatch ?? '',
     system.diagramSectionZonesJson ?? '',
@@ -89,12 +90,22 @@ function systemToCsvRows(system: SystemData): string[] {
         layer.layerType,
         layer.fill ?? '',
         resolveFastenerIcon(layer),
-        '',
+        layer.fastenerSpacingOcIn ?? '',
         layer.fastenerMinEdgeIn ?? '',
         layer.fastenerMinEndIn ?? '',
-        '', '', '', '', '',
+        layer.fastenerPattern ?? '',
+        layer.typModuleWidthIn ?? '',
+        layer.elementSpacingOcIn ?? '',
+        layer.cavityDepthIn ?? '',
+        layer.controlJointSpacingFt ?? '',
+        layer.drawModuleJoints === true ? '1' : layer.drawModuleJoints === false ? '0' : '',
+        layer.drawControlJoints === true ? '1' : layer.drawControlJoints === false ? '0' : '',
+        layer.drawFastenerGraphics ?? '',
+        layer.detailMaxModuleJoints !== undefined ? String(layer.detailMaxModuleJoints) : '',
+        layer.detailMinFeaturePx !== undefined ? String(layer.detailMinFeaturePx) : '',
         ...meta,
         layer.notes,
+        system.planDrawLayers?.length ? system.planDrawLayers.join(';') : '',
       ]
         .map((v) => escapeCsv(String(v)))
         .join(',')
@@ -120,9 +131,10 @@ function systemToCsvRows(system: SystemData): string[] {
       '—',
       '',
       'none',
-      '', '', '', '', '', '', '', '',
+      '', '', '', '', '', '', '', '', '', '', '', '', '',
       ...totalMeta,
       '',
+      system.planDrawLayers?.length ? system.planDrawLayers.join(';') : '',
     ]
       .map(escapeCsv)
       .join(',')
@@ -141,10 +153,13 @@ function buildCsv(
   const pushBldRow = (
     layerName: string,
     thicknessVal: string | number,
-    meta11: string[],
+    meta12: string[],
     drawingNote: string,
   ) => {
     rowNum += 1
+    const preConfig = [
+      '', '', '', '', '', '', '', '', '', '', '', '', '',
+    ] as string[]
     rows.push(
       [
         'BLD',
@@ -164,16 +179,17 @@ function buildCsv(
         'MISC',
         'MISC',
         'none',
-        '', '', '', '', '', '', '', '',
-        ...meta11,
+        ...preConfig,
+        ...meta12,
         drawingNote,
+        '',
       ]
         .map((v) => escapeCsv(String(v)))
         .join(',')
     )
   }
 
-  const empty11 = () => Array(11).fill('') as string[]
+  const empty12 = () => Array(12).fill('') as string[]
 
   for (let i = 0; i < BLD_DIM_ROWS.length; i++) {
     const [layerName, key] = BLD_DIM_ROWS[i]
@@ -192,7 +208,7 @@ function buildCsv(
                 : i === 5
                   ? 'Pixels per inch for section drawing'
                   : 'Pixels per inch for plan drawing'
-    pushBldRow(layerName, val, empty11(), note)
+    pushBldRow(layerName, val, empty12(), note)
   }
 
   for (let i = 0; i < BLD_DIAGRAM_REF_ROWS.length; i++) {
@@ -201,7 +217,7 @@ function buildCsv(
     pushBldRow(
       layerName,
       val ?? '',
-      empty11(),
+      empty12(),
       'Reference size for normalized Diagram_*_Zones_JSON (see docs/CSV_SCHEMA.md)',
     )
   }
@@ -212,9 +228,30 @@ function buildCsv(
     ['interior_partition', d.layoutRefs.interior_partition, 'Partition thickness in plan/section'],
     ['balcony_assembly', d.layoutRefs.balcony_assembly, 'Balcony / edge assembly thickness'],
     ['system_id_prefix', d.systemIdPrefix, 'Prefix for generated system IDs in the editor'],
+    [
+      'default_diagram_detail_level',
+      String(d.defaultDiagramDetailLevel ?? 1),
+      'Default section diagram detail preset (0–3)',
+    ],
+    [
+      'detail_max_module_joints',
+      String(d.detailMaxModuleJoints ?? 12),
+      'Max module crease segments per layer',
+    ],
+    [
+      'detail_min_feature_px',
+      String(d.detailMinFeaturePx ?? 8),
+      'Min layer size (px) for creases and shop extras',
+    ],
+    [
+      'shop_max_fastener_marks_per_layer',
+      String(d.shopMaxFastenerMarksPerLayer ?? 8),
+      'Cap on repeated fastener marks at shop detail level',
+    ],
   ]
   for (const [ck, cv, note] of configs) {
     rowNum += 1
+    const preConfig = ['', '', '', '', '', '', '', '', '', '', '', '', ''] as string[]
     rows.push(
       [
         'BLD',
@@ -234,11 +271,12 @@ function buildCsv(
         'MISC',
         'MISC',
         'none',
-        '', '', '', '', '', '', '', '',
+        ...preConfig,
         ck,
         cv,
-        '', '', '', '', '', '', '', '', '',
+        '', '', '', '', '', '', '', '', '', '',
         note,
+        '',
       ]
         .map((v) => escapeCsv(String(v)))
         .join(',')
@@ -352,7 +390,7 @@ export async function exportAllSheets(
   orderedSystems.forEach((system, index) => {
     const systemIndex = index + 3
     const svgStr = renderToStaticMarkup(
-      <SectionDrawing system={system} systemIndex={systemIndex} />
+      <SectionDrawing system={system} systemIndex={systemIndex} buildingDimensions={buildingDimensions} />
     )
     const safeName = system.name.replace(/[^\w\s-]/g, '').replace(/\s+/g, '-')
     svgEntries.push({

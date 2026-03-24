@@ -1,15 +1,12 @@
 import type { SystemData, BuildingDimensions } from '../types/system'
-import { CATEGORY_LABELS } from '../types/system'
 
 const LAYER_TYPES = 'CLT, WOOD, INSULATION, MEMBRANE, METAL, CONCRETE, AIR_GAP, GLASS, GRAVEL_SOIL, MISC'
-const CATEGORY_IDS = 'A, B, C, D'
 
 function buildDataSummary(systems: SystemData[], maxChars = 3500): string {
   const summary = systems.map(s => ({
     id: s.id,
     name: s.name,
     category: s.category,
-    categoryLabel: CATEGORY_LABELS[s.category],
     layerCount: s.layers.length,
     totalThickness: s.totalThickness,
     totalR: s.totalR,
@@ -34,10 +31,10 @@ export function buildSystemPrompt(systems: SystemData[], buildingDimensions: Bui
 
 ## Data Schema
 
-- **SystemData**: { id: string (e.g. "A4-01"), name: string, category: CategoryId, layers: Layer[], totalThickness: string, totalR: string }
+- **SystemData**: { id: string (e.g. "A4-01"), name: string, category: string (user-defined group label from CSV), layers: Layer[], totalThickness: string, totalR: string }
 - **Layer**: { index, name, material, thickness, rValue, connection, fastener, fastenerSize, fastenerIcon?, layerType, fill?, notes, visible? }
 - **fastenerIcon** (optional): one of: none, wood_screw, bolt, adhesive, rivet, plate, clip — shown on section callouts
-- **CategoryId**: ${CATEGORY_IDS} (A=Structural, B=Building Envelope, C=Interior, D=Special)
+- **category**: any short label the user chooses (e.g. "Structural Systems", "Envelope"); used for sidebar grouping
 - **LayerType**: ${LAYER_TYPES}
 
 ## Current Data
@@ -62,7 +59,7 @@ Where \`systems\` is an array of full SystemData objects:
 - For "add layer to system X": include the UPDATED system (same id) with the new layer appended. Recalculate totalThickness and totalR if possible.
 - Layer index should be 1-based sequential.
 - Valid layerType values: ${LAYER_TYPES}
-- Valid category values: ${CATEGORY_IDS}
+- **category** is a free-text label (not restricted to single letters)
 
 3. If the user's request is ambiguous or you cannot fulfill it, explain in natural language. Do not output the JSON block unless you are proposing concrete data changes.
 

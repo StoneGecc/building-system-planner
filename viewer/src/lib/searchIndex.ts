@@ -1,5 +1,4 @@
 import type { SystemData } from '../types/system'
-import { CATEGORY_LABELS } from '../types/system'
 
 export interface SearchHit {
   id: string
@@ -33,11 +32,18 @@ export function buildSearchHits(orderedSystems: SystemData[]): SearchHit[] {
     secondary: 'Composite plan · all systems',
     haystack: norm('A1 sheet 01 building plan level floor composite all systems'),
   })
+  hits.push({
+    id: 'page-impl',
+    pageIndex: 2,
+    primary: 'Implementation plan',
+    secondary: 'Grid layout · arch + MEP placement',
+    haystack: norm('implementation plan layout grid dots boxes MEP arch placement'),
+  })
 
   for (let i = 0; i < orderedSystems.length; i++) {
     const sys = orderedSystems[i]
-    const pageIndex = i + 2
-    const cat = CATEGORY_LABELS[sys.category]
+    const pageIndex = i + 3
+    const cat = sys.category?.trim() || 'Uncategorized'
     hits.push({
       id: `sys-${sys.id}`,
       pageIndex,

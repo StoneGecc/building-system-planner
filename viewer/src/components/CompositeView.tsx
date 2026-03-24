@@ -176,7 +176,7 @@ export function CompositeView({ pageType, systems, layout, zoom: zoomProp, onZoo
       {/* Drawing viewport — same 1200×820 sheet size as system sheets */}
       <div
         ref={viewportRef}
-        className="flex-1 overflow-auto bg-[#f0ede8] p-6"
+        className="flex-1 overflow-auto bg-[#f0ede8] pt-24 pl-24 pr-10 pb-12"
         style={{ overscrollBehavior: 'contain' }}
       >
         <div style={{ textAlign: 'center', minWidth: 'min-content', minHeight: 'min-content' }}>

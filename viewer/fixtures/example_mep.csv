@@ -1,0 +1,5 @@
+System_ID,Name,Discipline,Plan_Width_in,Notes
+M-SUP-01,Supply duct 24x12,M,12,Main trunk
+M-RET-01,Return duct 20x10,M,10,Corridor
+E-LGT-01,Lighting branch,E,0,Homerun symbolic
+P-CW-01,Cold water 2",P,2.375,OD

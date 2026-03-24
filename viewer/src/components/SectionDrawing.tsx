@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import type { RefObject } from 'react'
-import type { SystemData, Layer } from '../types/system'
+import type { ReactNode, RefObject } from 'react'
+import type { BuildingDimensions, DiagramDetailLevel, FastenerDrawMode, SystemData, Layer } from '../types/system'
 import { FASTENER_ICON_LABELS, resolveFastenerIcon } from '../lib/fastenerIcons'
 import { HatchDefs } from './HatchDefs'
 import { TitleBlock } from './TitleBlock'
@@ -13,6 +13,17 @@ import {
   DETAIL_SCALE_PX_PER_IN,
   type LayerRect,
 } from '../lib/geometry'
+import {
+  DIAGRAM_DETAIL_DEFAULTS,
+  effectiveDetailLevel,
+  effectiveDrawControlJoints,
+  effectiveDrawModuleJoints,
+  effectiveFastenerMode,
+  effectiveMaxModuleJoints,
+  effectiveMinFeaturePx,
+  effectiveShopFastenerCap,
+} from '../lib/diagramDetail'
+import { DEFAULT_LAYOUT_REFS } from '../data/schematicFrame'
 import {
   SHEET_W,
   SHEET_H,
@@ -190,12 +201,20 @@ function LayerFastenerSpanOnDrawing({
   r,
   isWall,
   pxPerInch,
+  fastenerMode,
+  detailLevel,
+  buildingDimensions,
 }: {
   layer: Layer
   r: LayerRect
   isWall: boolean
   pxPerInch: number
+  fastenerMode: FastenerDrawMode
+  detailLevel: DiagramDetailLevel
+  buildingDimensions: BuildingDimensions
 }) {
+  if (fastenerMode === 'none') return null
+
   const tip = [layer.fastener, layer.fastenerSize].filter(s => s && String(s).trim() && String(s).trim() !== '—').join(' · ')
   const iconId = resolveFastenerIcon(layer)
   if (!tip && iconId === 'none') return null
@@ -205,9 +224,11 @@ function LayerFastenerSpanOnDrawing({
   const capHalf = 11
   const capStroke = 1.35
   const stroke = '#1a1a1a'
+  const minWallSpanPx = detailLevel >= 2 ? 6 : 10
+  const minHorizHPx = detailLevel >= 2 ? 6 : 10
 
   if (isWall) {
-    if (r.w < 10) return null
+    if (r.w < minWallSpanPx) return null
     const { fromStart, fromEnd } = fastenerSpanInsetsPx(layer, r.w, pxPerInch)
     let x0 = r.x + fromStart
     let x1 = r.x + r.w - fromEnd
@@ -239,9 +260,29 @@ function LayerFastenerSpanOnDrawing({
     wallBoxX = Math.max(wallLabelMinLeft, Math.min(wallBoxX, wallLabelMaxRight - wallBoxW))
     let wallBoxY = my - capHalf - 5 - wallBoxH
     wallBoxY = Math.max(PANEL_Y + 4, wallBoxY)
+    const spacingIn = parseThickness(layer.fastenerSpacingOcIn ?? '')
+    const spacingPx = spacingIn > 0 ? spacingIn * pxPerInch : 0
+    const shopCap = effectiveShopFastenerCap(buildingDimensions)
+    const extraWallTicks: number[] = []
+    if (detailLevel >= 3 && spacingPx >= 4 && fastenerMode === 'full') {
+      const lo = Math.min(x0, x1)
+      const hi = Math.max(x0, x1)
+      let x = lo + spacingPx
+      let n = 0
+      const maxExtra = Math.max(0, shopCap - 1)
+      while (x < hi - 2 && n < maxExtra) {
+        if (Math.abs(x - xCap) > spacingPx * 0.35) {
+          extraWallTicks.push(x)
+          n++
+        }
+        x += spacingPx
+      }
+    }
     return (
       <g pointerEvents="none" fontFamily={MONO}>
-        <FastenerDescriptionBlock lines={wallLines} boxX={wallBoxX} boxY={wallBoxY} maxWidth={maxLabelW} />
+        {fastenerMode === 'full' ? (
+          <FastenerDescriptionBlock lines={wallLines} boxX={wallBoxX} boxY={wallBoxY} maxWidth={maxLabelW} />
+        ) : null}
         <line x1={x0} y1={my} x2={x1} y2={my} stroke={stroke} strokeWidth={0.7} strokeLinecap="butt" />
         <line
           x1={xCap}
@@ -252,11 +293,23 @@ function LayerFastenerSpanOnDrawing({
           strokeWidth={capStroke}
           strokeLinecap="square"
         />
+        {extraWallTicks.map((xx, i) => (
+          <line
+            key={i}
+            x1={xx}
+            y1={my - capHalf * 0.55}
+            x2={xx}
+            y2={my + capHalf * 0.55}
+            stroke={stroke}
+            strokeWidth={capStroke * 0.85}
+            strokeLinecap="square"
+          />
+        ))}
       </g>
     )
   }
 
-  if (r.h < 10) return null
+  if (r.h < minHorizHPx) return null
   const { fromStart, fromEnd } = fastenerSpanInsetsPx(layer, r.h, pxPerInch)
   const topFace = r.y
   const botFace = r.y + r.h
@@ -302,6 +355,24 @@ function LayerFastenerSpanOnDrawing({
   if (boxX + boxW > sectionRight) boxX = Math.max(sectionLeft, sectionRight - boxW)
   let boxY = midY - boxH / 2
   boxY = Math.max(PANEL_Y + 4, Math.min(boxY, PANEL_Y + PANEL_H - boxH - 4))
+  const vLo = Math.min(yCap, yStemEnd)
+  const vHi = Math.max(yCap, yStemEnd)
+  const spacingInH = parseThickness(layer.fastenerSpacingOcIn ?? '')
+  const spacingPxH = spacingInH > 0 ? spacingInH * pxPerInch : 0
+  const shopCapH = effectiveShopFastenerCap(buildingDimensions)
+  const extraHorizTicks: number[] = []
+  if (detailLevel >= 3 && spacingPxH >= 4 && fastenerMode === 'full') {
+    let y = vLo + spacingPxH
+    let n = 0
+    const maxExtra = Math.max(0, shopCapH - 1)
+    while (y < vHi - 2 && n < maxExtra) {
+      if (Math.abs(y - yCap) > spacingPxH * 0.35) {
+        extraHorizTicks.push(y)
+        n++
+      }
+      y += spacingPxH
+    }
+  }
   return (
     <g pointerEvents="none" fontFamily={MONO}>
       <line x1={mx} y1={yCap} x2={mx} y2={yStemEnd} stroke={stroke} strokeWidth={0.7} strokeLinecap="butt" />
@@ -314,9 +385,192 @@ function LayerFastenerSpanOnDrawing({
         strokeWidth={capStroke}
         strokeLinecap="square"
       />
-      <FastenerDescriptionBlock lines={horizLines} boxX={boxX} boxY={boxY} maxWidth={maxLabelW} />
+      {extraHorizTicks.map((yy, i) => (
+        <line
+          key={i}
+          x1={mx - capHalf * 0.55}
+          y1={yy}
+          x2={mx + capHalf * 0.55}
+          y2={yy}
+          stroke={stroke}
+          strokeWidth={capStroke * 0.85}
+          strokeLinecap="square"
+        />
+      ))}
+      {fastenerMode === 'full' ? (
+        <FastenerDescriptionBlock lines={horizLines} boxX={boxX} boxY={boxY} maxWidth={maxLabelW} />
+      ) : null}
     </g>
   )
+}
+
+/** Module / control / element creases from CSV spacing fields and detail level. */
+function LayerDetailCreases({
+  layer,
+  r,
+  isWall,
+  pxPerInch,
+  detailLevel,
+  buildingDimensions,
+}: {
+  layer: Layer
+  r: LayerRect
+  isWall: boolean
+  pxPerInch: number
+  detailLevel: DiagramDetailLevel
+  buildingDimensions: BuildingDimensions
+}) {
+  const minPx = effectiveMinFeaturePx(layer, buildingDimensions)
+  const maxMod = effectiveMaxModuleJoints(layer, buildingDimensions)
+  const wantMod = effectiveDrawModuleJoints(layer, detailLevel)
+  const wantCtrl = effectiveDrawControlJoints(layer, detailLevel)
+  const modIn = parseThickness(layer.typModuleWidthIn ?? '')
+  const ctrlFt = parseThickness(layer.controlJointSpacingFt ?? '')
+  const elemIn = parseThickness(layer.elementSpacingOcIn ?? '')
+
+  const lines: ReactNode[] = []
+  let key = 0
+
+  if (isWall) {
+    if (r.w < minPx && r.h < minPx) return null
+    if (wantMod && modIn > 0 && r.w >= minPx) {
+      const step = modIn * pxPerInch
+      if (step >= 3) {
+        let x = r.x + step
+        let n = 0
+        while (x < r.x + r.w - 1 && n < maxMod) {
+          lines.push(
+            <line
+              key={key++}
+              x1={x}
+              y1={r.y}
+              x2={x}
+              y2={r.y + r.h}
+              stroke="#5c5c5c"
+              strokeWidth={0.45}
+            />,
+          )
+          x += step
+          n++
+        }
+      }
+    }
+    if (wantCtrl && ctrlFt > 0 && r.h >= minPx) {
+      const step = ctrlFt * 12 * pxPerInch
+      if (step >= 4) {
+        let y = r.y + step
+        while (y < r.y + r.h - 1) {
+          lines.push(
+            <line
+              key={key++}
+              x1={r.x}
+              y1={y}
+              x2={r.x + r.w}
+              y2={y}
+              stroke="#777"
+              strokeWidth={0.4}
+              strokeDasharray="4 3"
+            />,
+          )
+          y += step
+        }
+      }
+    }
+    if (detailLevel >= 3 && elemIn > 0 && r.h >= minPx) {
+      const step = elemIn * pxPerInch
+      if (step >= 4) {
+        let y = r.y + step
+        let n = 0
+        const maxElem = maxMod * 2
+        while (y < r.y + r.h - 1 && n < maxElem) {
+          lines.push(
+            <line
+              key={key++}
+              x1={r.x}
+              y1={y}
+              x2={r.x + r.w}
+              y2={y}
+              stroke="#999"
+              strokeWidth={0.32}
+            />,
+          )
+          y += step
+          n++
+        }
+      }
+    }
+  } else {
+    if (r.w < minPx && r.h < minPx) return null
+    if (wantMod && modIn > 0 && r.h >= minPx) {
+      const step = modIn * pxPerInch
+      if (step >= 3) {
+        let y = r.y + step
+        let n = 0
+        while (y < r.y + r.h - 1 && n < maxMod) {
+          lines.push(
+            <line
+              key={key++}
+              x1={r.x}
+              y1={y}
+              x2={r.x + r.w}
+              y2={y}
+              stroke="#5c5c5c"
+              strokeWidth={0.45}
+            />,
+          )
+          y += step
+          n++
+        }
+      }
+    }
+    if (wantCtrl && ctrlFt > 0 && r.w >= minPx) {
+      const step = ctrlFt * 12 * pxPerInch
+      if (step >= 4) {
+        let x = r.x + step
+        while (x < r.x + r.w - 1) {
+          lines.push(
+            <line
+              key={key++}
+              x1={x}
+              y1={r.y}
+              x2={x}
+              y2={r.y + r.h}
+              stroke="#777"
+              strokeWidth={0.4}
+              strokeDasharray="4 3"
+            />,
+          )
+          x += step
+        }
+      }
+    }
+    if (detailLevel >= 3 && elemIn > 0 && r.w >= minPx) {
+      const step = elemIn * pxPerInch
+      if (step >= 4) {
+        let x = r.x + step
+        let n = 0
+        const maxElem = maxMod * 2
+        while (x < r.x + r.w - 1 && n < maxElem) {
+          lines.push(
+            <line
+              key={key++}
+              x1={x}
+              y1={r.y}
+              x2={x}
+              y2={r.y + r.h}
+              stroke="#999"
+              strokeWidth={0.32}
+            />,
+          )
+          x += step
+          n++
+        }
+      }
+    }
+  }
+
+  if (lines.length === 0) return null
+  return <g pointerEvents="none">{lines}</g>
 }
 
 /** Offset of cut indicator lines from section edge (same for wall and floor/roof sections) */
@@ -716,11 +970,13 @@ function DimensionLines({
   drawLayers,
   isWall,
   totalThickness,
+  detailLevel,
 }: {
   layerRects: LayerRect[]
   drawLayers: Layer[]
   isWall: boolean
   totalThickness: string
+  detailLevel: DiagramDetailLevel
 }) {
   if (layerRects.length === 0) return null
 
@@ -771,6 +1027,7 @@ function DimensionLines({
               </text>
             )
           }
+          if (detailLevel <= 0) return null
           // Narrow layer: jog leader below chain line, alternating left/right
           const side = i % 2 === 0 ? 1 : -1
           const jogX = midX + side * 18
@@ -860,6 +1117,7 @@ function DimensionLines({
             </text>
           )
         }
+        if (detailLevel <= 0) return null
         // Short layer: jog leader to the left, alternating above/below midpoint
         const side = i % 2 === 0 ? -8 : 8
         const jogY = midY + side
@@ -920,15 +1178,43 @@ const LAYER_TYPE_LABELS: Record<string, string> = {
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
+function fallbackBuildingDimensions(): BuildingDimensions {
+  return {
+    footprintWidth: 360,
+    footprintDepth: 480,
+    floorToFloor: 132,
+    voidClearWidth: 53,
+    stairWidth: 48,
+    sectionScale: 1.4,
+    planScale: 1.2,
+    thicknessBySystem: {},
+    layoutRefs: { ...DEFAULT_LAYOUT_REFS },
+    systemIdPrefix: 'A4-',
+    defaultDiagramDetailLevel: DIAGRAM_DETAIL_DEFAULTS.defaultLevel,
+    detailMaxModuleJoints: DIAGRAM_DETAIL_DEFAULTS.detailMaxModuleJoints,
+    detailMinFeaturePx: DIAGRAM_DETAIL_DEFAULTS.detailMinFeaturePx,
+    shopMaxFastenerMarksPerLayer: DIAGRAM_DETAIL_DEFAULTS.shopMaxFastenerMarksPerLayer,
+  }
+}
+
 interface SectionDrawingProps {
   system: SystemData
   systemIndex: number
+  buildingDimensions?: BuildingDimensions
   svgRef?: RefObject<SVGSVGElement>
   onOpenBulkEditWithLayer?: (systemId: string, layerIndex: number) => void
 }
 
-export function SectionDrawing({ system, systemIndex, svgRef, onOpenBulkEditWithLayer }: SectionDrawingProps) {
+export function SectionDrawing({
+  system,
+  systemIndex,
+  buildingDimensions: buildingDimensionsProp,
+  svgRef,
+  onOpenBulkEditWithLayer,
+}: SectionDrawingProps) {
   const [hoveredLayerIndex, setHoveredLayerIndex] = useState<number | null>(null)
+  const buildingDimensions = buildingDimensionsProp ?? fallbackBuildingDimensions()
+  const detailLevel = effectiveDetailLevel(system, buildingDimensions)
   const config = getSystemOrientation(system)
   const isWall = config.orientation === 'WALL'
 
@@ -1062,7 +1348,23 @@ export function SectionDrawing({ system, systemIndex, svgRef, onOpenBulkEditWith
               strokeWidth={isAirGap ? 0.8 : 0.9}
               strokeDasharray={isAirGap ? '5,3' : undefined}
             />
-            <LayerFastenerSpanOnDrawing layer={layer} r={r} isWall={isWall} pxPerInch={pxPerInch} />
+            <LayerDetailCreases
+              layer={layer}
+              r={r}
+              isWall={isWall}
+              pxPerInch={pxPerInch}
+              detailLevel={detailLevel}
+              buildingDimensions={buildingDimensions}
+            />
+            <LayerFastenerSpanOnDrawing
+              layer={layer}
+              r={r}
+              isWall={isWall}
+              pxPerInch={pxPerInch}
+              fastenerMode={effectiveFastenerMode(layer, detailLevel)}
+              detailLevel={detailLevel}
+              buildingDimensions={buildingDimensions}
+            />
             {/* Hit area for hover — blue outline only, no fill change */}
             <rect
               x={r.x} y={r.y} width={r.w} height={r.h}
@@ -1125,6 +1427,7 @@ export function SectionDrawing({ system, systemIndex, svgRef, onOpenBulkEditWith
         drawLayers={drawLayers}
         isWall={isWall}
         totalThickness={system.totalThickness}
+        detailLevel={detailLevel}
       />
 
       {/* ── Leaders (drawn behind callout text) ── */}
