@@ -39,11 +39,32 @@ export interface PlacedPlanColumn {
 
 export const PLAN_LAYOUT_VERSION = 1 as const
 
-/** Grid-snapped dimension run (Measure layer); optional in stored JSON. */
+/** Grid-snapped dimension run (Annotation · Measure line); optional in stored JSON. */
 export interface PlanMeasureGridRun {
   id: string
   edgeKeys: string[]
   totalPlanIn: number
+  startNode: { i: number; j: number }
+  endNode: { i: number; j: number }
+}
+
+/** Grid-snapped reference polyline (Annotation · Grid line); no dimension text. */
+export interface PlanAnnotationGridRun {
+  id: string
+  edgeKeys: string[]
+}
+
+/** Free text on plan (Annotation · Text); plan inches from site origin. */
+export interface PlanAnnotationLabel {
+  id: string
+  xIn: number
+  yIn: number
+  text: string
+}
+
+/** Straight section cut indicator between two grid nodes. */
+export interface PlanAnnotationSectionCut {
+  id: string
   startNode: { i: number; j: number }
   endNode: { i: number; j: number }
 }
@@ -63,6 +84,15 @@ export interface PlanTraceOverlay {
 /** Optional flags when updating the implementation plan from the app shell. */
 export type PlanSketchCommitOptions = { skipUndo?: boolean }
 
+/** One shared level / datum line on elevation canvases (layout sketch). */
+export type ElevationLevelLine = {
+  id: string
+  /** Grid row 0…siteNy (same convention as ground line). */
+  j: number
+  /** Optional tag (e.g. FF, L2). */
+  label?: string
+}
+
 export interface PlanLayoutSketch {
   version: typeof PLAN_LAYOUT_VERSION
   gridSpacingIn: number
@@ -71,6 +101,17 @@ export interface PlanLayoutSketch {
   cells: PlacedFloorCell[]
   /** Saved grid dimension lines; persist across layer changes and export. */
   measureRuns?: PlanMeasureGridRun[]
+  /** Annotation: dashed grid-reference polylines (no labels). */
+  annotationGridRuns?: PlanAnnotationGridRun[]
+  /** Annotation: text labels at plan coordinates. */
+  annotationLabels?: PlanAnnotationLabel[]
+  /** Annotation: section cut lines (straight, node to node). */
+  annotationSectionCuts?: PlanAnnotationSectionCut[]
+  /**
+   * Building height in plan inches (elevations, Setup “Building area”).
+   * Omitted → use `BuildingDimensions.floorToFloor` in UI.
+   */
+  buildingHeightIn?: number
   /**
    * Site / lot size in plan inches (lower-left aligned with building origin).
    * Omitted or invalid → use building footprint only (no yard).
@@ -91,6 +132,16 @@ export interface PlanLayoutSketch {
   roomByCell?: Record<string, string>
   /** Column tool: square footprints in plan inches. Omitted when empty. */
   columns?: PlacedPlanColumn[]
+  /**
+   * All elevation sheets share this: horizontal grid row index (0…siteNy) for a full-width grade / ground line.
+   * Stored on the floor-1 layout sketch (not per cardinal elevation). Aligns with horizontal grid edges.
+   */
+  elevationGroundPlaneJ?: number
+  /**
+   * Shared datum lines for all elevations (e.g. floor levels): full-width horizontals at grid rows.
+   * Stored on the layout sketch. Erase / Select use keys `lvl:{id}`.
+   */
+  elevationLevelLines?: ElevationLevelLine[]
 }
 
 /** Site dimensions for canvas; always ≥ building footprint. Lot size comes from Setup only. */
@@ -132,6 +183,12 @@ export function cellKeyString(c: Pick<PlacedFloorCell, 'i' | 'j'>): string {
 /** Catalog layer identity — only one stroke/fill per layer may occupy the same grid segment or cell. */
 export function layerIdentityFromEdge(e: Pick<PlacedGridEdge, 'source' | 'systemId'>): string {
   return `${e.source ?? 'arch'}\t${e.systemId}`
+}
+
+/** Arch wall / stair edges share one visual slot per grid segment (any system). */
+export function isExclusiveArchWallSegmentStroke(e: Pick<PlacedGridEdge, 'source' | 'kind'>): boolean {
+  if ((e.source ?? 'arch') !== 'arch') return false
+  return e.kind === 'wall' || e.kind === 'stairs'
 }
 
 export function layerIdentityFromCell(c: Pick<PlacedFloorCell, 'source' | 'systemId'>): string {

@@ -1,15 +1,26 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SystemData } from '../types/system'
 import { cn } from '../lib/utils'
-import { DISCIPLINES, getDisciplineFromSystemId } from '../data/disciplines'
-import { PAGE_IMPLEMENTATION_PLAN, systemPageIndex } from '../data/pageIndices'
+import { DISCIPLINES, getDisciplineFromSystemId, SIDEBAR_DISCIPLINE_ROWS } from '../data/disciplines'
+import {
+  OTHER_SUBGROUP_KEY,
+  orderedSubgroupKeysForDiscipline,
+  sheetSubgroupKeyForSystem,
+  sheetSubgroupTitle,
+} from '../data/disciplineSheetSubgroups'
+import { PAGE_PHYSICAL_SPACE_INVENTORY, systemPageIndex } from '../data/pageIndices'
+import { ELEVATION_SHEETS } from '../data/elevationSheets'
+import { FLOOR1_SHEETS } from '../data/floor1Sheets'
 
-/** Preserve first-seen order within a discipline list (matches sheet order). */
+const SIDEBAR_FLOOR1_GROUP_KEY = 'composite::floor1'
+const SIDEBAR_ELEVATIONS_GROUP_KEY = 'composite::elevations'
+
+/** First-seen CSV `Category` order within a sheet subgroup. */
 function orderedCategoriesForSystems(systems: SystemData[]): string[] {
   const seen = new Set<string>()
   const out: string[] = []
   for (const s of systems) {
-    const c = s.category || 'Uncategorized'
+    const c = (s.category || 'Uncategorized').trim() || 'Uncategorized'
     if (!seen.has(c)) {
       seen.add(c)
       out.push(c)
@@ -19,6 +30,27 @@ function orderedCategoriesForSystems(systems: SystemData[]): string[] {
 }
 
 const LS_SIDEBAR_COLLAPSED = 'building-system-viewer-sidebar-collapsed'
+const LS_SIDEBAR_HIDDEN_DISCIPLINES = 'building-system-viewer-sidebar-hidden-disciplines'
+
+function loadHiddenDisciplines(): Set<string> {
+  try {
+    const raw = localStorage.getItem(LS_SIDEBAR_HIDDEN_DISCIPLINES)
+    if (!raw) return new Set()
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((x): x is string => typeof x === 'string'))
+  } catch {
+    return new Set()
+  }
+}
+
+function saveHiddenDisciplines(hidden: Set<string>) {
+  try {
+    localStorage.setItem(LS_SIDEBAR_HIDDEN_DISCIPLINES, JSON.stringify([...hidden]))
+  } catch {
+    /* ignore */
+  }
+}
 
 function loadSidebarCollapsed(): boolean {
   try {
@@ -57,6 +89,32 @@ export function Sidebar({ orderedSystems, selectedPageIndex, onSelect, onSelectP
     return c
   })
   const [subCollapsed, setSubCollapsed] = useState<Record<string, boolean>>({})
+  const [hiddenDisciplines, setHiddenDisciplines] = useState(loadHiddenDisciplines)
+  const [discMenuOpen, setDiscMenuOpen] = useState(false)
+  const discMenuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    saveHiddenDisciplines(hiddenDisciplines)
+  }, [hiddenDisciplines])
+
+  useEffect(() => {
+    if (!discMenuOpen) return
+    const onDoc = (e: MouseEvent) => {
+      const el = discMenuRef.current
+      if (el && !el.contains(e.target as Node)) setDiscMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [discMenuOpen])
+
+  const toggleDisciplineHidden = (code: string) => {
+    setHiddenDisciplines((prev) => {
+      const next = new Set(prev)
+      if (next.has(code)) next.delete(code)
+      else next.add(code)
+      return next
+    })
+  }
 
   const toggle = (code: string) => {
     setCollapsed(prev => ({ ...prev, [code]: !prev[code] }))
@@ -235,11 +293,11 @@ export function Sidebar({ orderedSystems, selectedPageIndex, onSelect, onSelectP
             </span>
           </button>
           <button
-            onClick={() => onSelectPage(PAGE_IMPLEMENTATION_PLAN)}
+            onClick={() => onSelectPage(PAGE_PHYSICAL_SPACE_INVENTORY)}
             className={cn(
               'w-full flex items-start gap-2.5 px-4 py-2 text-left',
               'border-l-2 transition-colors duration-75',
-              selectedPageIndex === PAGE_IMPLEMENTATION_PLAN
+              selectedPageIndex === PAGE_PHYSICAL_SPACE_INVENTORY
                 ? 'border-l-foreground bg-muted'
                 : 'border-l-transparent hover:bg-muted/60',
             )}
@@ -248,184 +306,488 @@ export function Sidebar({ orderedSystems, selectedPageIndex, onSelect, onSelectP
               'font-mono text-[9px] font-bold tracking-wider shrink-0 mt-0.5',
               'inline-flex items-center justify-center min-w-[2rem] h-4 px-1',
               'border',
-              selectedPageIndex === PAGE_IMPLEMENTATION_PLAN
+              selectedPageIndex === PAGE_PHYSICAL_SPACE_INVENTORY
                 ? 'border-foreground text-foreground'
                 : 'border-border text-muted-foreground',
             )}>
-              IP
+              PSI
             </span>
             <span className={cn(
               'font-mono text-[9px] leading-tight',
-              selectedPageIndex === PAGE_IMPLEMENTATION_PLAN ? 'text-foreground font-medium' : 'text-muted-foreground',
+              selectedPageIndex === PAGE_PHYSICAL_SPACE_INVENTORY
+                ? 'text-foreground font-medium'
+                : 'text-muted-foreground',
             )}>
-              Implementation plan
+              Physical space inventory
             </span>
           </button>
+          <div>
+            <button
+              type="button"
+              onClick={() => toggleSub(SIDEBAR_FLOOR1_GROUP_KEY)}
+              className={cn(
+                'w-full flex items-center justify-between gap-2',
+                'px-4 py-1.5 text-left',
+                'hover:bg-muted/60 transition-colors duration-75',
+              )}
+            >
+              <span className="font-mono text-[8px] tracking-wide text-muted-foreground min-w-0 flex-1 text-left leading-snug truncate">
+                Floor 1
+              </span>
+              <svg
+                width="8"
+                height="8"
+                viewBox="0 0 10 10"
+                className={cn(
+                  'text-muted-foreground shrink-0 transition-transform duration-150',
+                  subCollapsed[SIDEBAR_FLOOR1_GROUP_KEY] !== true ? 'rotate-180' : 'rotate-0',
+                )}
+                aria-hidden
+              >
+                <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+              </svg>
+            </button>
+            {subCollapsed[SIDEBAR_FLOOR1_GROUP_KEY] !== true && (
+              <ul className="pb-0.5">
+                {FLOOR1_SHEETS.map((sheet) => (
+                  <li key={sheet.id}>
+                    <button
+                      type="button"
+                      onClick={() => onSelectPage(sheet.pageIndex)}
+                      className={cn(
+                        'w-full flex items-center gap-2.5 py-2 pr-4 pl-6 text-left',
+                        'border-l-2 transition-colors duration-75',
+                        selectedPageIndex === sheet.pageIndex
+                          ? 'border-l-foreground bg-muted'
+                          : 'border-l-transparent hover:bg-muted/60',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'font-mono text-[9px] font-bold tracking-wider shrink-0',
+                          'inline-flex items-center justify-center min-w-[2rem] h-4 px-1',
+                          'border',
+                          selectedPageIndex === sheet.pageIndex
+                            ? 'border-foreground text-foreground'
+                            : 'border-border text-muted-foreground',
+                        )}
+                      >
+                        {sheet.badge}
+                      </span>
+                      <span
+                        className={cn(
+                          'font-mono text-[9px] leading-none',
+                          selectedPageIndex === sheet.pageIndex ? 'text-foreground font-medium' : 'text-muted-foreground',
+                        )}
+                      >
+                        {sheet.label}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div>
+            <button
+              type="button"
+              onClick={() => toggleSub(SIDEBAR_ELEVATIONS_GROUP_KEY)}
+              className={cn(
+                'w-full flex items-center justify-between gap-2',
+                'px-4 py-1.5 text-left',
+                'hover:bg-muted/60 transition-colors duration-75',
+              )}
+            >
+              <span className="font-mono text-[8px] tracking-wide text-muted-foreground min-w-0 flex-1 text-left leading-snug truncate">
+                Elevations
+              </span>
+              <svg
+                width="8"
+                height="8"
+                viewBox="0 0 10 10"
+                className={cn(
+                  'text-muted-foreground shrink-0 transition-transform duration-150',
+                  subCollapsed[SIDEBAR_ELEVATIONS_GROUP_KEY] !== true ? 'rotate-180' : 'rotate-0',
+                )}
+                aria-hidden
+              >
+                <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+              </svg>
+            </button>
+            {subCollapsed[SIDEBAR_ELEVATIONS_GROUP_KEY] !== true && (
+              <ul className="pb-0.5">
+                {ELEVATION_SHEETS.map((sheet) => (
+                  <li key={sheet.id}>
+                    <button
+                      type="button"
+                      onClick={() => onSelectPage(sheet.pageIndex)}
+                      className={cn(
+                        'w-full flex items-center gap-2.5 py-2 pr-4 pl-6 text-left',
+                        'border-l-2 transition-colors duration-75',
+                        selectedPageIndex === sheet.pageIndex
+                          ? 'border-l-foreground bg-muted'
+                          : 'border-l-transparent hover:bg-muted/60',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'font-mono text-[9px] font-bold tracking-wider shrink-0',
+                          'inline-flex items-center justify-center min-w-[2rem] h-4 px-1',
+                          'border',
+                          selectedPageIndex === sheet.pageIndex
+                            ? 'border-foreground text-foreground'
+                            : 'border-border text-muted-foreground',
+                        )}
+                      >
+                        {sheet.badge}
+                      </span>
+                      <span
+                        className={cn(
+                          'font-mono text-[9px] leading-none',
+                          selectedPageIndex === sheet.pageIndex ? 'text-foreground font-medium' : 'text-muted-foreground',
+                        )}
+                      >
+                        {sheet.label}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </div>
         <div className="h-px bg-border mx-4 my-1" aria-hidden />
 
-        {/* Discipline dropdowns - badge only in category header */}
-        {DISCIPLINES.map(({ code, label }) => {
+        {/* Discipline dropdowns — order + light separators from SIDEBAR_DISCIPLINE_ROWS */}
+        {SIDEBAR_DISCIPLINE_ROWS.map((row, rowIdx) => {
+          if (row.kind === 'separator') {
+            return (
+              <div
+                key={`disc-sep-${rowIdx}`}
+                className="h-px bg-border/80 mx-4 my-1.5"
+                aria-hidden
+              />
+            )
+          }
+          const { code, label } = row
+          if (hiddenDisciplines.has(code)) return null
           const systems = systemsByDiscipline.get(code) ?? []
           const isOpen = collapsed[code] !== true
 
           return (
             <div key={code}>
               <button
+                type="button"
                 onClick={() => toggle(code)}
                 className={cn(
-                  'w-full flex items-center justify-between',
+                  'w-full flex items-center justify-between gap-2',
                   'px-4 py-2 text-left',
                   'hover:bg-muted transition-colors duration-75',
                 )}
               >
-                <div className="flex items-center gap-2">
+                <div className="flex min-w-0 flex-1 items-center gap-2">
                   <span className={cn(
                     'font-mono text-[10px] font-bold tracking-[0.15em]',
-                    'inline-flex items-center justify-center min-w-[1.5rem] h-5 px-1',
+                    'inline-flex items-center justify-center min-w-[1.5rem] h-5 px-1 shrink-0',
                     'bg-foreground text-white',
                   )}>
                     {code}
                   </span>
-                  <span className="font-mono text-[9px] tracking-wide text-muted-foreground uppercase">
+                  <span className="font-mono text-[9px] tracking-wide text-muted-foreground leading-snug min-w-0 truncate">
                     {label}
                   </span>
                 </div>
-                <svg
-                  width="10" height="10" viewBox="0 0 10 10"
-                  className={cn(
-                    'text-muted-foreground transition-transform duration-150',
-                    isOpen ? 'rotate-180' : 'rotate-0',
+                <span className="flex shrink-0 items-center gap-1">
+                  {systems.length > 0 && (
+                    <span
+                      className="font-mono text-[7px] tabular-nums text-muted-foreground/65 min-w-[0.875rem] text-right"
+                      title={`${systems.length} sheet${systems.length === 1 ? '' : 's'}`}
+                    >
+                      {systems.length}
+                    </span>
                   )}
-                >
-                  <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
-                </svg>
+                  <svg
+                    width="10"
+                    height="10"
+                    viewBox="0 0 10 10"
+                    className={cn(
+                      'text-muted-foreground transition-transform duration-150',
+                      isOpen ? 'rotate-180' : 'rotate-0',
+                    )}
+                    aria-hidden
+                  >
+                    <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                  </svg>
+                </span>
               </button>
 
-              {/* System list - with sub-categories (A Architectural) and bordered badge for system ID */}
-              {isOpen && systems.length > 0 && (
+              {/* System list — NCS-style sheet sub-groups (always listed; may be empty) */}
+              {isOpen && (
                 <ul className="pb-1">
-                  {code === 'A' ? (
-                    // A Architectural: group by CSV Category (free text)
-                    orderedCategoriesForSystems(systems).map((catLabel) => {
-                      const subSystems = systems
-                        .filter((s) => (s.category || 'Uncategorized') === catLabel)
-                        .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
-                      if (subSystems.length === 0) return null
-                      const subKey = `A::${catLabel}`
-                      const isSubOpen = subCollapsed[subKey] !== true
+                  {(() => {
+                    const bySubgroup = new Map<string, SystemData[]>()
+                    for (const s of systems) {
+                      const sk = sheetSubgroupKeyForSystem(s.id, code)
+                      if (!bySubgroup.has(sk)) bySubgroup.set(sk, [])
+                      bySubgroup.get(sk)!.push(s)
+                    }
+                    const keysToShow = orderedSubgroupKeysForDiscipline(code).filter((sk) => {
+                      if (sk === OTHER_SUBGROUP_KEY) {
+                        return (bySubgroup.get(sk)?.length ?? 0) > 0
+                      }
+                      return true
+                    })
+                    return keysToShow.map((subKey) => {
+                      const subSystems = [...(bySubgroup.get(subKey) ?? [])].sort((a, b) =>
+                        a.id.localeCompare(b.id, undefined, { numeric: true }),
+                      )
+                      const title = sheetSubgroupTitle(code, subKey)
+                      const heading =
+                        subKey === OTHER_SUBGROUP_KEY
+                          ? title
+                          : `${subKey}  ${title}`
+                      const rowKey = `${code}::${subKey}`
+                      const isSubOpen = subCollapsed[rowKey] !== true
                       return (
-                        <li key={catLabel}>
+                        <li key={subKey}>
                           <button
-                            onClick={() => toggleSub(subKey)}
+                            type="button"
+                            onClick={() => toggleSub(rowKey)}
                             className={cn(
-                              'w-full flex items-center justify-between',
-                              'px-4 py-1.5 pl-6 text-left',
+                              'w-full flex items-center justify-between gap-2',
+                              'px-4 py-1.5 text-left',
                               'hover:bg-muted/60 transition-colors duration-75',
                             )}
                           >
-                            <span className="font-mono text-[8px] tracking-wide text-muted-foreground uppercase min-w-0 truncate text-left">
-                              {catLabel}
+                            <span className="font-mono text-[8px] tracking-wide text-muted-foreground min-w-0 flex-1 text-left leading-snug truncate">
+                              {heading}
                             </span>
-                            <svg
-                              width="8" height="8" viewBox="0 0 10 10"
-                              className={cn(
-                                'text-muted-foreground transition-transform duration-150',
-                                isSubOpen ? 'rotate-180' : 'rotate-0',
+                            <span className="flex shrink-0 items-center gap-1">
+                              {subSystems.length > 0 && (
+                                <span
+                                  className="font-mono text-[7px] tabular-nums text-muted-foreground/65 min-w-[0.875rem] text-right"
+                                  title={`${subSystems.length} sheet${subSystems.length === 1 ? '' : 's'}`}
+                                >
+                                  {subSystems.length}
+                                </span>
                               )}
-                            >
-                              <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
-                            </svg>
+                              <svg
+                                width="8"
+                                height="8"
+                                viewBox="0 0 10 10"
+                                className={cn(
+                                  'text-muted-foreground shrink-0 transition-transform duration-150',
+                                  isSubOpen ? 'rotate-180' : 'rotate-0',
+                                )}
+                                aria-hidden
+                              >
+                                <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                              </svg>
+                            </span>
                           </button>
                           {isSubOpen && (
-                            <ul className="pb-1">
-                              {subSystems.map(sys => {
-                                const idx = orderedSystems.findIndex(s => s.id === sys.id)
-                                const sysPage = idx >= 0 ? systemPageIndex(idx) : -1
-                                const isSelected = selectedPageIndex === sysPage
-                                return (
-                                  <li key={sys.id}>
-                                    <button
-                                      onClick={() => onSelect(sys)}
-                                      className={cn(
-                                        'w-full flex items-start gap-2.5 px-4 py-2 pl-8 text-left',
-                                        'border-l-2 transition-colors duration-75',
-                                        isSelected
-                                          ? 'border-l-foreground bg-muted'
-                                          : 'border-l-transparent hover:bg-muted/60',
+                            <ul className="pb-0.5">
+                              {(() => {
+                                const categories = orderedCategoriesForSystems(subSystems)
+                                const hasCategoryLayer =
+                                  categories.length > 1 ||
+                                  (categories.length === 1 && categories[0] !== 'Uncategorized')
+                                const sheetPad = hasCategoryLayer ? 'pl-6' : 'pl-4'
+                                const sheetBtn = (sys: SystemData) => {
+                                  const idx = orderedSystems.findIndex((s) => s.id === sys.id)
+                                  const sysPage = idx >= 0 ? systemPageIndex(idx) : -1
+                                  const isSelected = selectedPageIndex === sysPage
+                                  return (
+                                    <li key={sys.id}>
+                                      <button
+                                        type="button"
+                                        onClick={() => onSelect(sys)}
+                                        className={cn(
+                                          'w-full flex items-start gap-2.5 py-2 pr-4 text-left',
+                                          sheetPad,
+                                          'border-l-2 transition-colors duration-75',
+                                          isSelected
+                                            ? 'border-l-foreground bg-muted'
+                                            : 'border-l-transparent hover:bg-muted/60',
+                                        )}
+                                      >
+                                        <span
+                                          className={cn(
+                                            'font-mono text-[9px] font-bold tracking-wider shrink-0 mt-0.5',
+                                            'inline-flex items-center justify-center min-w-[2.75rem] h-4 px-1',
+                                            'border',
+                                            isSelected
+                                              ? 'border-foreground text-foreground'
+                                              : 'border-border text-muted-foreground',
+                                          )}
+                                        >
+                                          {sys.id}
+                                        </span>
+                                        <span
+                                          className={cn(
+                                            'font-mono text-[9px] leading-tight truncate',
+                                            isSelected ? 'text-foreground font-medium' : 'text-muted-foreground',
+                                          )}
+                                        >
+                                          {sys.name}
+                                        </span>
+                                      </button>
+                                    </li>
+                                  )
+                                }
+
+                                if (categories.length === 1) {
+                                  const only = categories[0]!
+                                  const sorted = subSystems
+                                    .slice()
+                                    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
+                                  const showCsvLabel = only !== 'Uncategorized'
+                                  return (
+                                    <>
+                                      {showCsvLabel && (
+                                        <li className="pl-6 pr-4 py-0.5 font-mono text-[8px] text-muted-foreground/85 select-none border-l-2 border-transparent list-none">
+                                          <span className="flex items-center justify-between gap-2">
+                                            <span className="min-w-0 truncate">{only}</span>
+                                            {sorted.length > 0 && (
+                                              <span
+                                                className="shrink-0 font-mono text-[7px] tabular-nums text-muted-foreground/60"
+                                                title={`${sorted.length} sheet${sorted.length === 1 ? '' : 's'}`}
+                                              >
+                                                {sorted.length}
+                                              </span>
+                                            )}
+                                          </span>
+                                        </li>
                                       )}
-                                    >
-                                      <span className={cn(
-                                        'font-mono text-[9px] font-bold tracking-wider shrink-0 mt-0.5',
-                                        'inline-flex items-center justify-center min-w-[2.75rem] h-4 px-1',
-                                        'border',
-                                        isSelected
-                                          ? 'border-foreground text-foreground'
-                                          : 'border-border text-muted-foreground',
-                                      )}>
-                                        {sys.id}
-                                      </span>
-                                      <span className={cn(
-                                        'font-mono text-[9px] leading-tight truncate',
-                                        isSelected ? 'text-foreground font-medium' : 'text-muted-foreground',
-                                      )}>
-                                        {sys.name}
-                                      </span>
-                                    </button>
-                                  </li>
-                                )
-                              })}
+                                      {sorted.map(sheetBtn)}
+                                    </>
+                                  )
+                                }
+
+                                return categories.map((catLabel) => {
+                                  const inCat = subSystems
+                                    .filter((s) => ((s.category || 'Uncategorized').trim() || 'Uncategorized') === catLabel)
+                                    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
+                                  if (inCat.length === 0) return null
+                                  const csvKey = `${code}::${subKey}::cat::${catLabel}`
+                                  const csvOpen = subCollapsed[csvKey] !== true
+                                  return (
+                                    <li key={catLabel}>
+                                      <button
+                                        type="button"
+                                        onClick={() => toggleSub(csvKey)}
+                                        className={cn(
+                                          'w-full flex items-center justify-between gap-2',
+                                          'pl-6 pr-4 py-1 text-left',
+                                          'hover:bg-muted/40 transition-colors duration-75',
+                                        )}
+                                      >
+                                        <span className="font-mono text-[8px] tracking-wide text-muted-foreground/90 min-w-0 flex-1 truncate text-left">
+                                          {catLabel}
+                                        </span>
+                                        <span className="flex shrink-0 items-center gap-1">
+                                          {inCat.length > 0 && (
+                                            <span
+                                              className="font-mono text-[7px] tabular-nums text-muted-foreground/60 min-w-[0.875rem] text-right"
+                                              title={`${inCat.length} sheet${inCat.length === 1 ? '' : 's'}`}
+                                            >
+                                              {inCat.length}
+                                            </span>
+                                          )}
+                                          <svg
+                                            width="7"
+                                            height="7"
+                                            viewBox="0 0 10 10"
+                                            className={cn(
+                                              'text-muted-foreground/80 shrink-0 transition-transform duration-150',
+                                              csvOpen ? 'rotate-180' : 'rotate-0',
+                                            )}
+                                            aria-hidden
+                                          >
+                                            <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                                          </svg>
+                                        </span>
+                                      </button>
+                                      {csvOpen && <ul className="pb-0.5">{inCat.map(sheetBtn)}</ul>}
+                                    </li>
+                                  )
+                                })
+                              })()}
                             </ul>
                           )}
                         </li>
                       )
                     })
-                  ) : (
-                    // Other disciplines: flat list with bordered badge
-                    [...systems]
-                      .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
-                      .map(sys => {
-                      const idx = orderedSystems.findIndex(s => s.id === sys.id)
-                      const sysPage = idx >= 0 ? systemPageIndex(idx) : -1
-                      const isSelected = selectedPageIndex === sysPage
-                      return (
-                        <li key={sys.id}>
-                          <button
-                            onClick={() => onSelect(sys)}
-                            className={cn(
-                              'w-full flex items-start gap-2.5 px-4 py-2 pl-6 text-left',
-                              'border-l-2 transition-colors duration-75',
-                              isSelected
-                                ? 'border-l-foreground bg-muted'
-                                : 'border-l-transparent hover:bg-muted/60',
-                            )}
-                          >
-                            <span className={cn(
-                              'font-mono text-[9px] font-bold tracking-wider shrink-0 mt-0.5',
-                              'inline-flex items-center justify-center min-w-[2.75rem] h-4 px-1',
-                              'border',
-                              isSelected
-                                ? 'border-foreground text-foreground'
-                                : 'border-border text-muted-foreground',
-                            )}>
-                              {sys.id}
-                            </span>
-                            <span className={cn(
-                              'font-mono text-[9px] leading-tight truncate',
-                              isSelected ? 'text-foreground font-medium' : 'text-muted-foreground',
-                            )}>
-                              {sys.name}
-                            </span>
-                          </button>
-                        </li>
-                      )
-                    })
-                  )}
+                  })()}
                 </ul>
               )}
             </div>
           )
         })}
+
+        <div className="h-px bg-border mx-4 my-2 shrink-0" aria-hidden />
+        <div ref={discMenuRef} className="relative px-4 pb-2">
+          <button
+            type="button"
+            onClick={() => setDiscMenuOpen((o) => !o)}
+            aria-expanded={discMenuOpen}
+            aria-haspopup="menu"
+            className={cn(
+              'w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-sm border border-border',
+              'font-mono text-[9px] tracking-wide text-muted-foreground text-left',
+              'hover:bg-muted hover:text-foreground transition-colors',
+            )}
+          >
+            <span>Disciplines</span>
+            <svg
+              width="10"
+              height="10"
+              viewBox="0 0 10 10"
+              className={cn(
+                'text-muted-foreground shrink-0 transition-transform duration-150',
+                discMenuOpen ? 'rotate-180' : 'rotate-0',
+              )}
+              aria-hidden
+            >
+              <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+            </svg>
+          </button>
+          {discMenuOpen && (
+            <div
+              role="menu"
+              className="absolute left-0 right-0 bottom-full z-50 mb-1 max-h-[min(70vh,22rem)] overflow-y-auto rounded-sm border border-border bg-white py-1 shadow-md"
+            >
+              {SIDEBAR_DISCIPLINE_ROWS.map((row, rowIdx) => {
+                if (row.kind === 'separator') {
+                  return (
+                    <div
+                      key={`menu-sep-${rowIdx}`}
+                      className="h-px bg-border/70 mx-2 my-0.5"
+                      aria-hidden
+                    />
+                  )
+                }
+                const { code, label } = row
+                const visible = !hiddenDisciplines.has(code)
+                return (
+                  <label
+                    key={code}
+                    className="flex cursor-pointer items-center gap-2 px-2 py-1.5 font-mono text-[9px] hover:bg-muted/60"
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-3 w-3 shrink-0 rounded-sm border-border accent-foreground"
+                      checked={visible}
+                      onChange={() => toggleDisciplineHidden(code)}
+                    />
+                    <span className="shrink-0 font-bold tabular-nums text-foreground">{code}</span>
+                    <span className="min-w-0 truncate text-muted-foreground leading-snug">{label}</span>
+                  </label>
+                )
+              })}
+            </div>
+          )}
+        </div>
       </nav>
       )}
 

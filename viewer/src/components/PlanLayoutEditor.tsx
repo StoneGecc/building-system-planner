@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import type { BuildingDimensions, SystemData } from '../types/system'
 import type { MepItem } from '../types/mep'
 import type {
@@ -9,6 +10,8 @@ import type {
   EdgeStrokeKind,
   GridEdgeKey,
   PlanMeasureGridRun,
+  PlanAnnotationGridRun,
+  PlanAnnotationSectionCut,
   PlanSketchCommitOptions,
 } from '../types/planLayout'
 import {
@@ -17,6 +20,7 @@ import {
   cellPaintKind,
   cellsByGeometry,
   isExclusiveArchFloorPaintCell,
+  isExclusiveArchWallSegmentStroke,
   layerIdentityFromCell,
   layerIdentityFromColumn,
   layerIdentityFromEdge,
@@ -42,6 +46,7 @@ import {
   nearestGridEdge,
   edgesInNodeSpan,
   nodeUnderCursor,
+  wallLineDragEndSnapDistIn,
   edgeEndpointsCanvasPx,
   planInchesToCell,
   closerNodeOnEdge,
@@ -54,26 +59,86 @@ import {
 import {
   planEnclosureBarrierKeys,
   computeEnclosedRoomComponents,
-  findRoomComponentForCellKey,
+  buildPlanRoomCellKeyIndex,
   resolveRoomDisplayName,
   roomZoneHasAssignedName,
 } from '../lib/planRooms'
-import { formatThickness } from '../lib/csvParser'
 import {
   planCellFill,
   planEdgeStroke,
   planEdgeStrokeDasharray,
   planPaintSwatchColor,
+  planPlacedEdgeOpacity,
+  planCellColumnOpacity,
   type PlanColorCatalog,
   type PlanPlaceMode,
+  type PlanVisualProfile,
 } from '../lib/planLayerColors'
 import { planColumnSquareInchesFromSystem } from '../lib/planColumnSize'
 import { PLAN_ROOMS_LAYER_ID, PLAN_ROOMS_LAYER_SYSTEM_ID } from '../lib/planRoomsLayerIdentity'
+import type { ActiveCatalog } from './planLayoutCore/types'
+import { usePlanEditorZoom } from './planLayoutCore/usePlanEditorZoom'
+export type { ActiveCatalog } from './planLayoutCore/types'
+import {
+  EMPTY_ANNOTATION_GRID,
+  EMPTY_ANNOTATION_LABELS,
+  EMPTY_ELEVATION_LEVEL_LINES,
+  EMPTY_MEASURE_RUNS,
+  EMPTY_SECTION_CUTS,
+  GRID_TRIM,
+  MARQUEE_CLICK_MAX_PX,
+  PLAN_ROOM_BOUNDARY_CYAN,
+  PLAN_ROOM_BOUNDARY_DASH,
+  PLAN_ROOM_BOUNDARY_MUTED_DASH,
+  PLAN_ROOM_BOUNDARY_MUTED_STROKE,
+  ZOOM_BUTTON_RATIO,
+  ZOOM_MAX,
+  ZOOM_WHEEL_SENS,
+} from './planLayoutCore/constants'
+import {
+  annotationHitKeyAtPlanInches,
+  annotationKeysIntersectingPlanRect,
+  clampCellMoveDelta,
+  clampEdgeMoveDelta,
+  clampMarqueeSvgRect,
+  clampRoomBoundaryMoveDelta,
+  clampZoom,
+  floorCellInsetDims,
+  gridRunMeasureCaption,
+  mergePaintStrokeIntoCells,
+  moveClickMaxPlanIn,
+  nextSketchAfterRemovingAnnotationKeys,
+  planRoomZoneOutlineSegments,
+  planToolbarEdgeKind,
+  pointInSelectedFloorBBox,
+  previewPathCentroidCanvas,
+  wallPreviewPolylinePointsCanvas,
+  strokeWidthForEdge,
+  strokeWidthForRoomBoundaryLine,
+  strokeWidthForRoomBoundaryUnderlay,
+} from './planLayoutCore/planEditorGeometry'
+import {
+  AnnotationKeyHighlightOverlay,
+  GridPathDimensionOverlay,
+  GridReferencePathOverlay,
+  PlanRoomNameDetail,
+  SectionCutGraphic,
+} from './planLayoutCore/overlays'
 
 export type LayoutTool = 'paint' | 'rect' | 'erase' | 'select'
-export type ActiveCatalog = 'arch' | 'mep'
 export type FloorTool = 'paint' | 'fill' | 'erase' | 'select'
-export type MeasureTool = 'line' | 'erase'
+/** Annotation place mode sub-tools (implementation plan). */
+export type AnnotationTool =
+  | 'measureLine'
+  | 'gridLine'
+  | 'textLabel'
+  | 'sectionCut'
+  | 'select'
+  | 'erase'
+  /** Elevation sheets only: full-width horizontal grade line (`elevationGroundPlaneJ`). */
+  | 'groundLine'
+  /** Elevation sheets only: shared datum / level lines (`elevationLevelLines`). */
+  | 'levelLine'
 /** Room layer: Line / Rect / Erase / Select like walls; Fill applies the room name to a bounded zone. */
 export type RoomTool = 'paint' | 'rect' | 'erase' | 'select' | 'fill' | 'autoFill'
 
@@ -91,8 +156,14 @@ interface PlanLayoutEditorProps {
   roomTool: RoomTool
   structureTool: LayoutTool
   floorTool: FloorTool
-  /** Measure layer only: draw dimension runs vs click a segment to remove a run. */
-  measureTool?: MeasureTool
+  /** Annotation mode: dimension / grid ref / text / section / erase. */
+  annotationTool?: AnnotationTool
+  /** Text tool: string placed at click (plan inches). */
+  annotationLabelDraft?: string
+  /** Elevation · Level line tool: optional tag shown at the left of the line. */
+  levelLineLabelDraft?: string
+  /** Fired when annotation Select tool selection changes (`dim:…`, `grid:…`, `sec:…`, `lbl:…`). */
+  onSelectedAnnotationKeysChange?: (keys: readonly string[]) => void
   mepItems: MepItem[]
   /** Arch catalog systems (for column footprint size from layer thickness). */
   orderedSystems: readonly SystemData[]
@@ -100,6 +171,11 @@ interface PlanLayoutEditorProps {
   planColorCatalog: PlanColorCatalog
   /** Site dimension unit from Setup — used to label measure tool distances. */
   planSiteDisplayUnit: PlanSiteDisplayUnit
+  /**
+   * When set, drawing grid uses this rectangle (plan inches) instead of resolved site/footprint from the sketch.
+   * Used for elevation sheets (horizontal span = footprint width or depth by face; vertical = building height).
+   */
+  canvasExtentsIn?: { widthIn: number; heightIn: number } | null
   pickTolerancePx?: number
   /** Reference image (plan inches space); drawn above floor, grid, and wall edges — pointer-events none so drawing still hits the grid. */
   traceOverlay?: {
@@ -113,513 +189,39 @@ interface PlanLayoutEditorProps {
   } | null
   /** When true, line/floor painting and selection are disabled (e.g. overlay transform UI is active). */
   suspendPlanPainting?: boolean
+  /** When false, MEP run placement/edits are blocked (e.g. Layout sheet). */
+  allowMepEditing?: boolean
+  /** Dim/highlight geometry by Floor 1 sheet context. */
+  planVisualProfile?: PlanVisualProfile | null
   /** Layers bar hover: `source\\tsystemId` — highlights that layer on the plan. */
   layersBarHoverLayerId?: string | null
   /** Increment `nonce` to select all edges/cells for this layer (parent sets active catalog + system + tools/mode). */
   layersBarSelectRequest?: { source: ActiveCatalog; systemId: string; nonce: number } | null
+  /** Increment to select everything on the current layer tool group (walls / floor / rooms / …). */
+  globalSelectAllNonce?: number
   /** Room Select: highlighted zone cell keys; click fill picks a zone and calls `onRoomZoneSelect`. */
   selectedRoomZoneCellKeys?: readonly string[] | null
   /** Room Select: pick or clear the named zone (parent syncs toolbar name + applies on blur). */
   onRoomZoneSelect?: (payload: { cellKeys: readonly string[]; displayName: string } | null) => void
+  /**
+   * Bump `nonce` when the parent wants the viewport to frame these grid cells (e.g. room picked from toolbar).
+   * Uses the same SVG cell coordinates as the plan grid.
+   */
+  roomZoneCameraRequest?: { nonce: number; cellKeys: readonly string[] } | null
   className?: string
 }
 
-const EMPTY_MEASURE_RUNS: PlanMeasureGridRun[] = []
-
-const ZOOM_MIN = 0.15
-const ZOOM_MAX = 6
-/** Multiplicative step for +/- buttons (≈16% per click). */
-const ZOOM_BUTTON_RATIO = 1.16
-/** Trackpad / Ctrl+wheel sensitivity (higher = faster zoom). */
-const ZOOM_WHEEL_SENS = 0.0032
-
-function clampZoom(z: number): number {
-  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z))
-}
-
-type ZoomAnchorCommit = {
-  z0: number
-  ux: number
-  uy: number
-  brBefore: DOMRectReadOnly
-  scrollBefore: { l: number; t: number }
-}
-
-const GRID_TRIM = 0.5
-/** Below this size (SVG px), marquee release = single edge/cell erase (click). */
-const MARQUEE_CLICK_MAX_PX = 5
-/** Plan inches — below this drag distance, edge/cell move counts as a click (toggle / deselect). */
-const MOVE_CLICK_MAX_PLAN_IN = (deltaIn: number) => Math.max(deltaIn * 0.12, 0.25)
-
-/** Stroke kind for the current toolbar category (Walls vs Windows vs …); not a single layer row. */
-function planToolbarEdgeKind(placeMode: PlanPlaceMode, activeCatalog: ActiveCatalog): EdgeStrokeKind {
-  if (placeMode === 'window') return 'window'
-  if (placeMode === 'door') return 'door'
-  if (placeMode === 'roof') return 'roof'
-  if (placeMode === 'mep') return 'run'
-  return activeCatalog === 'mep' ? 'run' : 'wall'
-}
-
-function clampEdgeMoveDelta(
-  edges: PlacedGridEdge[],
-  di: number,
-  dj: number,
-  nx: number,
-  ny: number,
-): { di: number; dj: number } {
-  if (edges.length === 0) return { di: 0, dj: 0 }
-  let loDi = -Infinity
-  let hiDi = Infinity
-  let loDj = -Infinity
-  let hiDj = Infinity
-  for (const e of edges) {
-    if (e.axis === 'h') {
-      loDi = Math.max(loDi, -e.i)
-      hiDi = Math.min(hiDi, nx - 1 - e.i)
-      loDj = Math.max(loDj, -e.j)
-      hiDj = Math.min(hiDj, ny - e.j)
-    } else {
-      loDi = Math.max(loDi, -e.i)
-      hiDi = Math.min(hiDi, nx - e.i)
-      loDj = Math.max(loDj, -e.j)
-      hiDj = Math.min(hiDj, ny - 1 - e.j)
-    }
-  }
-  if (!Number.isFinite(loDi) || !Number.isFinite(hiDi)) return { di: 0, dj: 0 }
-  return {
-    di: Math.max(loDi, Math.min(hiDi, di)),
-    dj: Math.max(loDj, Math.min(hiDj, dj)),
-  }
-}
-
-function clampRoomBoundaryMoveDelta(
-  edges: GridEdgeKey[],
-  di: number,
-  dj: number,
-  nx: number,
-  ny: number,
-): { di: number; dj: number } {
-  return clampEdgeMoveDelta(edges as PlacedGridEdge[], di, dj, nx, ny)
-}
-
-function clampCellMoveDelta(
-  cells: PlacedFloorCell[],
-  di: number,
-  dj: number,
-  nx: number,
-  ny: number,
-): { di: number; dj: number } {
-  if (cells.length === 0) return { di: 0, dj: 0 }
-  const maxI = nx - 1
-  const maxJ = ny - 1
-  if (maxI < 0 || maxJ < 0) return { di: 0, dj: 0 }
-  let loDi = -Infinity
-  let hiDi = Infinity
-  let loDj = -Infinity
-  let hiDj = Infinity
-  for (const c of cells) {
-    loDi = Math.max(loDi, -c.i)
-    hiDi = Math.min(hiDi, maxI - c.i)
-    loDj = Math.max(loDj, -c.j)
-    hiDj = Math.min(hiDj, maxJ - c.j)
-  }
-  return {
-    di: Math.max(loDi, Math.min(hiDi, di)),
-    dj: Math.max(loDj, Math.min(hiDj, dj)),
-  }
-}
-
-/** True if plan point lies inside the axis-aligned bbox of all selected floor cells (handles gaps inside L-shaped selections). */
-function pointInSelectedFloorBBox(
-  xIn: number,
-  yIn: number,
-  selectedPlacedKeys: Set<string>,
-  deltaIn: number,
-): boolean {
-  const d = Math.max(1e-6, deltaIn)
-  let minI = Infinity
-  let maxI = -Infinity
-  let minJ = Infinity
-  let maxJ = -Infinity
-  for (const pk of selectedPlacedKeys) {
-    const p = parsePlacedCellKey(pk)
-    if (!p) continue
-    minI = Math.min(minI, p.i)
-    maxI = Math.max(maxI, p.i)
-    minJ = Math.min(minJ, p.j)
-    maxJ = Math.max(maxJ, p.j)
-  }
-  if (!Number.isFinite(minI)) return false
-  const x0 = minI * d
-  const x1 = (maxI + 1) * d
-  const y0 = minJ * d
-  const y1 = (maxJ + 1) * d
-  return xIn >= x0 && xIn <= x1 && yIn >= y0 && yIn <= y1
-}
-
-/** Merge floor/stair paint stroke into cell list (arch: one fill per grid square; new stroke wins). */
-function mergePaintStrokeIntoCells(base: PlacedFloorCell[], stroke: readonly PlacedFloorCell[]): PlacedFloorCell[] {
-  let next = [...base]
-  for (const placed of stroke) {
-    const ck = cellKeyString(placed)
-    const lid = layerIdentityFromCell(placed)
-    const pk = cellPaintKind(placed)
-    if (isExclusiveArchFloorPaintCell(placed)) {
-      next = next.filter((c) => cellKeyString(c) !== ck || !isExclusiveArchFloorPaintCell(c))
-    } else {
-      next = next.filter(
-        (c) => !(cellKeyString(c) === ck && layerIdentityFromCell(c) === lid && cellPaintKind(c) === pk),
-      )
-    }
-    next.push(placed)
-  }
-  return normalizeExclusiveArchFloorPaintCells(next)
-}
-
-function clampMarqueeSvgRect(
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-  cw: number,
-  ch: number,
-): { x: number; y: number; w: number; h: number } {
-  const x1 = Math.max(0, Math.min(cw, Math.min(ax, bx)))
-  const x2 = Math.max(0, Math.min(cw, Math.max(ax, bx)))
-  const y1 = Math.max(0, Math.min(ch, Math.min(ay, by)))
-  const y2 = Math.max(0, Math.min(ch, Math.max(ay, by)))
-  return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 }
-}
-
-function floorCellInsetDims(
-  cellPx: number,
-  idx: number,
-  n: number,
-  cell?: Pick<PlacedFloorCell, 'cellKind'>,
-): { inset: number; w: number } {
-  // Stairs are authored as full grid squares; when a cell also has floor paint on another layer,
-  // skip nesting so the stair fill matches the grid (floor still draws underneath).
-  if (cell?.cellKind === 'stairs') return { inset: 0, w: cellPx }
-  if (n <= 1) return { inset: 0, w: cellPx }
-  const step = Math.min((cellPx * 0.44) / n, cellPx * 0.1)
-  const inset = idx * step
-  const w = Math.max(cellPx - 2 * inset, cellPx * 0.22)
-  return { inset, w }
-}
-
-function strokeWidthForEdge(
-  d: BuildingDimensions,
-  e: PlacedGridEdge,
-  mepById: Map<string, MepItem>,
-): number {
-  const source = e.source ?? 'arch'
-  const kind = e.kind ?? 'run'
-  if (kind === 'wall' && source === 'arch') {
-    const th = d.thicknessBySystem[e.systemId] ?? 6
-    return Math.max(1, Math.min(th * d.planScale, 48))
-  }
-  if (kind === 'window' && source === 'arch') {
-    const th = d.thicknessBySystem[e.systemId] ?? 6
-    return Math.max(1, Math.min(th * d.planScale * 0.22, 14))
-  }
-  if (kind === 'door' && source === 'arch') {
-    const th = d.thicknessBySystem[e.systemId] ?? 6
-    return Math.max(1.5, Math.min(th * d.planScale * 0.28, 18))
-  }
-  if (kind === 'roof' && source === 'arch') {
-    const th = d.thicknessBySystem[e.systemId] ?? 6
-    return Math.max(1.5, Math.min(th * d.planScale * 0.85, 40))
-  }
-  if (kind === 'stairs' && source === 'arch') {
-    const th = d.thicknessBySystem[e.systemId] ?? 6
-    return Math.max(1.5, Math.min(th * d.planScale * 0.72, 36))
-  }
-  if (source === 'mep') {
-    const m = mepById.get(e.systemId)
-    const w = m?.planWidthIn ?? 0
-    if (w > 0) return Math.max(1, Math.min(w * d.planScale, 40))
-    return kind === 'wall' ? 4 : 2
-  }
-  return kind === 'wall' ? Math.max(2, 6 * d.planScale * 0.15) : 2
-}
-
-/** Room boundary segments (Room mode, in plan stroke order). */
-function strokeWidthForRoomBoundaryLine(d: BuildingDimensions): number {
-  return Math.max(1.15, Math.min(3.1, 1.85 * d.planScale * 0.12))
-}
-
-/** Room boundaries under floor/grid when not in Room mode — faint reference. */
-function strokeWidthForRoomBoundaryUnderlay(d: BuildingDimensions): number {
-  return Math.max(0.55, Math.min(1.35, 0.88 * d.planScale * 0.055))
-}
-
-/** Outer perimeter of a cell union in canvas px (for room-zone selection outline). */
-function planRoomZoneOutlineSegments(
-  cellKeys: readonly string[],
-  cellPx: number,
-): { x1: number; y1: number; x2: number; y2: number }[] {
-  const set = new Set(cellKeys)
-  const segs: { x1: number; y1: number; x2: number; y2: number }[] = []
-  for (const k of cellKeys) {
-    const parts = k.split(':')
-    const si = Number(parts[0])
-    const sj = Number(parts[1])
-    if (!Number.isFinite(si) || !Number.isFinite(sj)) continue
-    const x0 = si * cellPx
-    const y0 = sj * cellPx
-    const xr = (si + 1) * cellPx
-    const yb = (sj + 1) * cellPx
-    if (!set.has(cellKeyString({ i: si, j: sj - 1 }))) {
-      segs.push({ x1: x0, y1: y0, x2: xr, y2: y0 })
-    }
-    if (!set.has(cellKeyString({ i: si, j: sj + 1 }))) {
-      segs.push({ x1: x0, y1: yb, x2: xr, y2: yb })
-    }
-    if (!set.has(cellKeyString({ i: si - 1, j: sj }))) {
-      segs.push({ x1: x0, y1: y0, x2: x0, y2: yb })
-    }
-    if (!set.has(cellKeyString({ i: si + 1, j: sj }))) {
-      segs.push({ x1: xr, y1: y0, x2: xr, y2: yb })
-    }
-  }
-  return segs
-}
-
-/** Room mode: dashed bright cyan construction / named-room ring. */
-const PLAN_ROOM_BOUNDARY_CYAN = '#00e5ff'
-const PLAN_ROOM_BOUNDARY_DASH = '5 5'
-/** Other tools: faint dashed reference (not cyan). */
-const PLAN_ROOM_BOUNDARY_MUTED_STROKE = 'hsl(220, 10%, 55%)'
-const PLAN_ROOM_BOUNDARY_MUTED_DASH = '3.5 4'
-
-const PLAN_ROOM_DETAIL_MONO = "'Courier New', Courier, monospace"
-
-/** Room label as a small title-block style detail (matches section / composite sheet typography). */
-function PlanRoomNameDetail({
-  cx,
-  cy,
-  cellPx,
-  displayName,
-  fallbackIndex,
-  areaSqFtLabel,
-}: {
-  cx: number
-  cy: number
-  cellPx: number
-  displayName: string
-  fallbackIndex: number
-  /** Pre-formatted area, e.g. "128.5 sq ft" */
-  areaSqFtLabel: string
-}) {
-  const raw = displayName.trim() || `Room ${fallbackIndex}`
-  const nameUpper = raw.toUpperCase()
-  const pad = Math.max(3, Math.min(9, cellPx * 0.11))
-  const areaFs = Math.max(5.5, Math.min(7.5, cellPx * 0.14))
-  const nameFs = Math.max(7, Math.min(11.5, cellPx * 0.22))
-  const ruleSw = Math.max(0.35, 0.5)
-  const charWName = nameFs * 0.56
-  const charWArea = areaFs * 0.56
-  const maxW = Math.min(cellPx * 16, 300, Math.max(120, cellPx * 8))
-  const maxNameChars = Math.max(4, Math.floor((maxW - 2 * pad) / charWName))
-  const nameLine =
-    nameUpper.length <= maxNameChars
-      ? nameUpper
-      : `${nameUpper.slice(0, Math.max(1, maxNameChars - 1))}…`
-  const maxAreaChars = Math.max(6, Math.floor((maxW - 2 * pad) / charWArea))
-  const areaLine =
-    areaSqFtLabel.length <= maxAreaChars
-      ? areaSqFtLabel
-      : `${areaSqFtLabel.slice(0, Math.max(1, maxAreaChars - 1))}…`
-  const w = Math.min(
-    maxW,
-    Math.max(
-      cellPx * 3.2,
-      nameLine.length * charWName + 2 * pad,
-      areaLine.length * charWArea + 2 * pad,
-    ),
-  )
-  const nameBlock = nameFs + 3
-  const areaBlock = areaFs + 3
-  const h = pad + nameBlock + areaBlock + pad
-  const x0 = cx - w / 2
-  const y0 = cy - h / 2
-  const ruleY = y0 + pad + nameBlock - 1
-  const nameBaseline = y0 + pad + nameFs * 0.88
-  const areaBaseline = y0 + pad + nameBlock + areaFs * 0.88
-
-  return (
-    <g fontFamily={PLAN_ROOM_DETAIL_MONO} pointerEvents="none" aria-hidden>
-      <rect x={x0} y={y0} width={w} height={h} fill="white" stroke="black" strokeWidth={ruleSw} />
-      <line
-        x1={x0 + pad}
-        y1={ruleY}
-        x2={x0 + w - pad}
-        y2={ruleY}
-        stroke="black"
-        strokeWidth={ruleSw * 0.9}
-      />
-      <text
-        x={cx}
-        y={nameBaseline}
-        textAnchor="middle"
-        fontSize={nameFs}
-        fontWeight="bold"
-        fill="black"
-        letterSpacing={0.55}
-      >
-        {nameLine}
-      </text>
-      <text
-        x={cx}
-        y={areaBaseline}
-        textAnchor="middle"
-        fontSize={areaFs}
-        fill="#475569"
-        letterSpacing={0.35}
-      >
-        {areaLine}
-      </text>
-    </g>
-  )
-}
-
-function gridRunMeasureCaption(
-  totalPlanIn: number,
-  start: { i: number; j: number },
-  end: { i: number; j: number },
-  edgeCount: number,
-  unit: PlanSiteDisplayUnit,
-): { primary: string; sub: string; status: string } {
-  const su = PLAN_SITE_UNIT_SHORT[unit]
-  const primary = `${formatSiteMeasure(totalPlanIn, unit)} ${su}`
-  const di = Math.abs(end.i - start.i)
-  const dj = Math.abs(end.j - start.j)
-  const sub = `${edgeCount} grid Δ · |Δi|=${di} · |Δj|=${dj} (nodes)`
-  return { primary, sub, status: `${primary} — ${sub}` }
-}
-
-/** Center of preview path in canvas px — for floating length label while dragging. */
-function previewPathCentroidCanvas(
-  edgeKeyStrs: string[],
-  bd: BuildingDimensions,
-  gridDelta: number,
-): { x: number; y: number } | null {
-  let sx = 0
-  let sy = 0
-  let n = 0
-  for (const ks of edgeKeyStrs) {
-    const parsed = parseEdgeKeyString(ks)
-    if (!parsed) continue
-    const { x1, y1, x2, y2 } = edgeEndpointsCanvasPx(bd, parsed, gridDelta)
-    sx += (x1 + x2) / 2
-    sy += (y1 + y2) / 2
-    n += 1
-  }
-  if (n === 0) return null
-  return { x: sx / n, y: sy / n }
-}
-
-/** Grid-snapped run with dimension ticks at ends and label near path. */
-function GridPathDimensionOverlay({
-  d,
-  delta,
-  edgeKeys,
-  startNode,
-  endNode,
-  primary,
-  sub,
-  dashed,
-}: {
-  d: BuildingDimensions
-  delta: number
-  edgeKeys: string[]
-  startNode: { i: number; j: number }
-  endNode: { i: number; j: number }
-  primary: string
-  sub: string
-  dashed?: boolean
-}) {
-  const stroke = dashed ? '#1d4ed8' : '#0f172a'
-  const subFill = dashed ? '#1e40af' : '#475569'
-  const dash = dashed ? '5 4' : undefined
-  let sx = 0
-  let sy = 0
-  let n = 0
-  const lines = edgeKeys.map((ks) => {
-    const parsed = parseEdgeKeyString(ks)
-    if (!parsed) return null
-    const { x1, y1, x2, y2 } = edgeEndpointsCanvasPx(d, parsed, delta)
-    sx += (x1 + x2) / 2
-    sy += (y1 + y2) / 2
-    n += 1
-    return (
-      <line
-        key={`md-${ks}`}
-        x1={x1}
-        y1={y1}
-        x2={x2}
-        y2={y2}
-        stroke={stroke}
-        strokeWidth={dashed ? 2.25 : 2.75}
-        strokeLinecap="square"
-        strokeDasharray={dash}
-      />
-    )
-  })
-  const mx = n > 0 ? sx / n : 0
-  const my = n > 0 ? sy / n : 0
-  const ps = planInchesToCanvasPx(d, startNode.i * delta, startNode.j * delta)
-  const pe = planInchesToCanvasPx(d, endNode.i * delta, endNode.j * delta)
-  const tk = 6.5
-  return (
-    <g pointerEvents="none">
-      {lines}
-      <line
-        x1={ps.x - tk}
-        y1={ps.y - tk}
-        x2={ps.x + tk}
-        y2={ps.y + tk}
-        stroke={stroke}
-        strokeWidth={1.15}
-        strokeLinecap="square"
-      />
-      <line
-        x1={pe.x - tk}
-        y1={pe.y - tk}
-        x2={pe.x + tk}
-        y2={pe.y + tk}
-        stroke={stroke}
-        strokeWidth={1.15}
-        strokeLinecap="square"
-      />
-      <text
-        x={mx}
-        y={my - 6}
-        textAnchor="middle"
-        dominantBaseline="middle"
-        fill={stroke}
-        stroke="#fff"
-        strokeWidth={2.5}
-        paintOrder="stroke fill"
-        style={{ fontFamily: "'Courier New', Courier, monospace", fontSize: 11 }}
-      >
-        {primary}
-      </text>
-      <text
-        x={mx}
-        y={my + 8}
-        textAnchor="middle"
-        dominantBaseline="middle"
-        fill={subFill}
-        stroke="#fff"
-        strokeWidth={2}
-        paintOrder="stroke fill"
-        style={{ fontFamily: "'Courier New', Courier, monospace", fontSize: 9 }}
-      >
-        {sub}
-      </text>
-    </g>
-  )
+function wallPreviewRubberPlanInFrom(
+  endNode: { i: number; j: number },
+  pin: { xIn: number; yIn: number },
+  gridDeltaIn: number,
+): { x0: number; y0: number; x1: number; y1: number } | null {
+  const x0 = endNode.i * gridDeltaIn
+  const y0 = endNode.j * gridDeltaIn
+  const x1 = pin.xIn
+  const y1 = pin.yIn
+  if (Math.hypot(x1 - x0, y1 - y0) < gridDeltaIn * 0.06) return null
+  return { x0, y0, x1, y1 }
 }
 
 export function PlanLayoutEditor({
@@ -633,29 +235,39 @@ export function PlanLayoutEditor({
   roomTool,
   structureTool,
   floorTool,
-  measureTool = 'line',
+  annotationTool = 'measureLine',
+  annotationLabelDraft = '',
+  levelLineLabelDraft = '',
+  onSelectedAnnotationKeysChange,
   mepItems,
   orderedSystems,
   planColorCatalog,
   planSiteDisplayUnit,
+  canvasExtentsIn = null,
   pickTolerancePx = 14,
   traceOverlay = null,
   suspendPlanPainting = false,
+  allowMepEditing = true,
+  planVisualProfile = null,
   layersBarHoverLayerId = null,
   layersBarSelectRequest = null,
+  globalSelectAllNonce = 0,
   selectedRoomZoneCellKeys = null,
   onRoomZoneSelect,
+  roomZoneCameraRequest = null,
   className,
 }: PlanLayoutEditorProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const planBoxRef = useRef<HTMLDivElement>(null)
-  const zoomCommitRef = useRef<ZoomAnchorCommit | null>(null)
+  const { zoom, setZoom, zoomRef, applyZoom, applyZoomRef, zoomCommitRef } = usePlanEditorZoom(
+    scrollRef,
+    planBoxRef,
+  )
   const paintDragRef = useRef(false)
   const lastStrokeEdgeKeyRef = useRef<string | null>(null)
   const lastStrokeCellKeyRef = useRef<string | null>(null)
   const lastWallNodeRef = useRef<{ i: number; j: number } | null>(null)
-  const [zoom, setZoom] = useState(1)
   const [hoverEdge, setHoverEdge] = useState<string | null>(null)
   const [hoverCell, setHoverCell] = useState<{ i: number; j: number } | null>(null)
   /** Column paint: snapped footprint under cursor (same style family as wall-line dashed preview). */
@@ -667,6 +279,13 @@ export function PlanLayoutEditor({
   /** Ephemeral floor/stair cells while dragging Paint — committed once on pointer up (keeps parent sketch updates off the hot path). */
   const [floorStrokeOverlay, setFloorStrokeOverlay] = useState<PlacedFloorCell[] | null>(null)
   const [wallLinePreviewKeys, setWallLinePreviewKeys] = useState<string[] | null>(null)
+  /** Short dashed segment from snapped path end to live cursor (plan inches). */
+  const [wallLinePreviewRubberPlanIn, setWallLinePreviewRubberPlanIn] = useState<{
+    x0: number
+    y0: number
+    x1: number
+    y1: number
+  } | null>(null)
   const [eraseMarqueeSvg, setEraseMarqueeSvg] = useState<{
     x: number
     y: number
@@ -678,9 +297,37 @@ export function PlanLayoutEditor({
   /** Room boundary selection — geometry keys `h:i:j` / `v:i:j`. */
   const [selectedRoomEdgeKeys, setSelectedRoomEdgeKeys] = useState<Set<string>>(() => new Set())
   const [selectedCellKeys, setSelectedCellKeys] = useState<Set<string>>(() => new Set())
+  /** Columns tool — `placedColumnKey` values (floor Select sub-tool). */
+  const [selectedColumnKeys, setSelectedColumnKeys] = useState<Set<string>>(() => new Set())
+  /** Annotation Select — keys `dim:id`, `grid:id`, `sec:id`, `lbl:id`. */
+  const [selectedAnnotationKeys, setSelectedAnnotationKeys] = useState<Set<string>>(() => new Set())
+  /** Hover highlight for annotation Select tool (under-cursor preview). */
+  const [hoverAnnotationSelectKey, setHoverAnnotationSelectKey] = useState<string | null>(null)
+  /** Hover highlight for annotation Erase tool (under-cursor preview). */
+  const [hoverAnnotationEraseKey, setHoverAnnotationEraseKey] = useState<string | null>(null)
+  /** While dragging an annotation erase box, keys that intersect the marquee (preview). */
+  const [eraseMarqueeAnnotationPreviewKeys, setEraseMarqueeAnnotationPreviewKeys] = useState<string[] | null>(
+    null,
+  )
   const [movePreview, setMovePreview] = useState<{ di: number; dj: number } | null>(null)
   const measureRunIdRef = useRef(0)
+  const annotationGridRunIdRef = useRef(0)
+  const sectionCutIdRef = useRef(0)
+  const annotationLabelIdRef = useRef(0)
+  const levelLineIdRef = useRef(0)
   const measureRuns = sketch.measureRuns?.length ? sketch.measureRuns : EMPTY_MEASURE_RUNS
+  const annotationGridRuns = sketch.annotationGridRuns?.length
+    ? sketch.annotationGridRuns
+    : EMPTY_ANNOTATION_GRID
+  const annotationLabels = sketch.annotationLabels?.length
+    ? sketch.annotationLabels
+    : EMPTY_ANNOTATION_LABELS
+  const annotationSectionCuts = sketch.annotationSectionCuts?.length
+    ? sketch.annotationSectionCuts
+    : EMPTY_SECTION_CUTS
+  const elevationLevelLines = sketch.elevationLevelLines?.length
+    ? sketch.elevationLevelLines
+    : EMPTY_ELEVATION_LEVEL_LINES
   /** Live measure drag endpoints (grid nodes) for preview label — mirrors wall-line snap. */
   const [measurePreviewNodes, setMeasurePreviewNodes] = useState<{
     start: { i: number; j: number }
@@ -700,6 +347,8 @@ export function PlanLayoutEditor({
     | 'wall-line'
     | 'chain-line'
     | 'measure-line'
+    | 'annotation-grid-line'
+    | 'section-cut-line'
     | 'wall-rect'
     | 'marquee'
     | 'floor-line'
@@ -715,14 +364,14 @@ export function PlanLayoutEditor({
     | 'room-marquee'
     | 'room-select-marquee'
     | 'room-move-edges'
+    | 'annotation-select-marquee'
+    | 'annotation-erase-marquee'
     | null
   >(null)
   const marqueeStartRef = useRef<{ x: number; y: number } | null>(null)
   const marqueeRectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
   /** Last pointer position (for Shift chain preview when key is pressed before the next move). */
   const lastPointerClientRef = useRef<{ clientX: number; clientY: number } | null>(null)
-  const zoomRef = useRef(zoom)
-  zoomRef.current = zoom
   const floorToolRef = useRef(floorTool)
   floorToolRef.current = floorTool
 
@@ -731,49 +380,22 @@ export function PlanLayoutEditor({
   const floorStrokeAccumRef = useRef<PlacedFloorCell[]>([])
   const floorStrokeRafRef = useRef<number | null>(null)
 
-  const measureToolActive = placeMode === 'measure'
-
-  const applyZoom = useCallback((targetZoom: number, anchor?: { clientX: number; clientY: number }) => {
-    setZoom((z0) => {
-      const z1 = clampZoom(targetZoom)
-      if (Math.abs(z1 - z0) < 1e-9) {
-        zoomCommitRef.current = null
-        return z0
-      }
-      const scroll = scrollRef.current
-      const box = planBoxRef.current
-      if (scroll && box && anchor) {
-        const br = box.getBoundingClientRect()
-        const relX = anchor.clientX - br.left
-        const relY = anchor.clientY - br.top
-        zoomCommitRef.current = {
-          z0,
-          ux: relX / z0,
-          uy: relY / z0,
-          brBefore: br,
-          scrollBefore: { l: scroll.scrollLeft, t: scroll.scrollTop },
-        }
-      } else {
-        zoomCommitRef.current = null
-      }
-      return z1
-    })
-  }, [])
-
-  const applyZoomRef = useRef(applyZoom)
-  applyZoomRef.current = applyZoom
+  const annotationToolActive = placeMode === 'annotate'
 
   useLayoutEffect(() => {
-    const c = zoomCommitRef.current
-    if (!c) return
-    zoomCommitRef.current = null
-    const scroll = scrollRef.current
-    const box = planBoxRef.current
-    if (!scroll || !box) return
-    const brAfter = box.getBoundingClientRect()
-    scroll.scrollLeft = c.scrollBefore.l + c.ux * (zoom - c.z0) + (c.brBefore.left - brAfter.left)
-    scroll.scrollTop = c.scrollBefore.t + c.uy * (zoom - c.z0) + (c.brBefore.top - brAfter.top)
-  }, [zoom])
+    if (!wallLinePreviewKeys?.length) setWallLinePreviewRubberPlanIn(null)
+  }, [wallLinePreviewKeys])
+
+  useEffect(() => {
+    if (!annotationToolActive || annotationTool !== 'select') setHoverAnnotationSelectKey(null)
+  }, [annotationToolActive, annotationTool])
+
+  useEffect(() => {
+    if (!annotationToolActive || annotationTool !== 'erase') {
+      setHoverAnnotationEraseKey(null)
+      setEraseMarqueeAnnotationPreviewKeys(null)
+    }
+  }, [annotationToolActive, annotationTool])
 
   useEffect(() => {
     if (structureTool !== 'select') setSelectedEdgeKeys(new Set())
@@ -790,11 +412,11 @@ export function PlanLayoutEditor({
       floorTool !== 'paint' ||
       activeCatalog !== 'arch' ||
       suspendPlanPainting ||
-      measureToolActive
+      annotationToolActive
     ) {
       setColumnPaintPreview(null)
     }
-  }, [placeMode, floorTool, activeCatalog, suspendPlanPainting, measureToolActive])
+  }, [placeMode, floorTool, activeCatalog, suspendPlanPainting, annotationToolActive])
 
   useEffect(() => {
     if (placeMode !== 'column' || floorTool !== 'paint' || activeCatalog !== 'arch') return
@@ -811,6 +433,10 @@ export function PlanLayoutEditor({
   }, [floorTool])
 
   useEffect(() => {
+    if (placeMode !== 'column' || floorTool !== 'select') setSelectedColumnKeys(new Set())
+  }, [placeMode, floorTool])
+
+  useEffect(() => {
     if (roomTool !== 'select') setSelectedRoomEdgeKeys(new Set())
   }, [roomTool])
 
@@ -818,12 +444,24 @@ export function PlanLayoutEditor({
     if (placeMode !== 'room') setSelectedRoomEdgeKeys(new Set())
   }, [placeMode])
 
+  useEffect(() => {
+    if (!annotationToolActive || annotationTool !== 'select') {
+      setSelectedAnnotationKeys(new Set())
+    }
+  }, [annotationToolActive, annotationTool])
+
+  useEffect(() => {
+    onSelectedAnnotationKeysChange?.(Array.from(selectedAnnotationKeys))
+  }, [selectedAnnotationKeys, onSelectedAnnotationKeysChange])
+
   const lastLayersBarSelectNonce = useRef(0)
   useEffect(() => {
     const req = layersBarSelectRequest
     if (!req?.systemId || req.nonce < 1) return
     if (req.nonce === lastLayersBarSelectNonce.current) return
     lastLayersBarSelectNonce.current = req.nonce
+    setSelectedAnnotationKeys(new Set())
+    setSelectedColumnKeys(new Set())
     if (req.systemId === PLAN_ROOMS_LAYER_SYSTEM_ID) {
       setSelectedEdgeKeys(new Set())
       setSelectedCellKeys(new Set())
@@ -893,6 +531,7 @@ export function PlanLayoutEditor({
       setMovePreview(null)
       setMeasurePreviewNodes(null)
       setChainLineErasePreview(false)
+      setEraseMarqueeAnnotationPreviewKeys(null)
     },
     [onSketchChange],
   )
@@ -906,8 +545,71 @@ export function PlanLayoutEditor({
     placeMode !== 'floor' &&
     placeMode !== 'stairs' &&
     placeMode !== 'column' &&
-    placeMode !== 'measure' &&
+    placeMode !== 'annotate' &&
     placeMode !== 'room'
+
+  const lastGlobalSelectAllNonce = useRef(0)
+  useEffect(() => {
+    const n = globalSelectAllNonce ?? 0
+    if (n < 1 || n === lastGlobalSelectAllNonce.current) return
+    lastGlobalSelectAllNonce.current = n
+    setSelectedEdgeKeys(new Set())
+    setSelectedCellKeys(new Set())
+    setSelectedRoomEdgeKeys(new Set())
+    setSelectedColumnKeys(new Set())
+    setSelectedAnnotationKeys(new Set())
+    onRoomZoneSelect?.(null)
+
+    if (placeMode === 'annotate') {
+      const keys: string[] = []
+      for (const r of sketch.measureRuns ?? []) keys.push(`dim:${r.id}`)
+      for (const r of sketch.annotationGridRuns ?? []) keys.push(`grid:${r.id}`)
+      for (const c of sketch.annotationSectionCuts ?? []) keys.push(`sec:${c.id}`)
+      for (const l of sketch.annotationLabels ?? []) keys.push(`lbl:${l.id}`)
+      for (const l of sketch.elevationLevelLines ?? []) keys.push(`lvl:${l.id}`)
+      setSelectedAnnotationKeys(new Set(keys))
+      return
+    }
+    if (placeMode === 'room') {
+      const rb = sketch.roomBoundaryEdges ?? []
+      setSelectedRoomEdgeKeys(new Set(rb.map((e) => edgeKeyString(e))))
+      return
+    }
+    if (placeMode === 'floor' || placeMode === 'stairs') {
+      const want = placeMode === 'stairs' ? ('stairs' as const) : ('floor' as const)
+      const picked = (sketch.cells ?? []).filter((c) => cellPaintKind(c) === want).map(placedCellKey)
+      setSelectedCellKeys(new Set(picked))
+      return
+    }
+    if (placeMode === 'column') {
+      const picked = (sketch.columns ?? []).map(placedColumnKey)
+      setSelectedColumnKeys(new Set(picked))
+      return
+    }
+    if (isEdgeLayerMode) {
+      const wantKind = planToolbarEdgeKind(placeMode, activeCatalog)
+      const edgeKeys = sketch.edges
+        .filter((e) => (e.kind ?? 'wall') === wantKind)
+        .map(placedEdgeKey)
+      setSelectedEdgeKeys(new Set(edgeKeys))
+    }
+  }, [
+    globalSelectAllNonce,
+    placeMode,
+    activeCatalog,
+    isEdgeLayerMode,
+    sketch.edges,
+    sketch.cells,
+    sketch.columns,
+    sketch.roomBoundaryEdges,
+    sketch.measureRuns,
+    sketch.annotationGridRuns,
+    sketch.annotationSectionCuts,
+    sketch.annotationLabels,
+    sketch.elevationLevelLines,
+    onRoomZoneSelect,
+  ])
+
   const isRoomBoundaryEdgeMode =
     placeMode === 'room' && roomTool !== 'fill' && roomTool !== 'autoFill'
   const edgePlacementSource = useMemo<ActiveCatalog>(
@@ -920,7 +622,25 @@ export function PlanLayoutEditor({
     [placeMode, activeCatalog],
   )
 
-  const { w: siteWIn, h: siteHIn } = useMemo(() => resolvedSiteInches(sketch, d), [sketch, d])
+  const { w: siteWIn, h: siteHIn } = useMemo(() => {
+    if (
+      canvasExtentsIn &&
+      Number.isFinite(canvasExtentsIn.widthIn) &&
+      Number.isFinite(canvasExtentsIn.heightIn) &&
+      canvasExtentsIn.widthIn > 0 &&
+      canvasExtentsIn.heightIn > 0
+    ) {
+      return { w: canvasExtentsIn.widthIn, h: canvasExtentsIn.heightIn }
+    }
+    return resolvedSiteInches(sketch, d)
+  }, [canvasExtentsIn, sketch, d])
+  const isElevationCanvas = Boolean(
+    canvasExtentsIn &&
+      Number.isFinite(canvasExtentsIn.widthIn) &&
+      Number.isFinite(canvasExtentsIn.heightIn) &&
+      canvasExtentsIn.widthIn > 0 &&
+      canvasExtentsIn.heightIn > 0,
+  )
   const cw = siteWIn * d.planScale
   const ch = siteHIn * d.planScale
   const delta = sketch.gridSpacingIn
@@ -928,6 +648,7 @@ export function PlanLayoutEditor({
   const { nx: siteNx, ny: siteNy } = useMemo(() => gridCounts(siteWIn, siteHIn, delta), [siteWIn, siteHIn, delta])
 
   const mepById = useMemo(() => new Map(mepItems.map((m) => [m.id, m])), [mepItems])
+  const blockMepMutations = !allowMepEditing && (placeMode === 'mep' || activeCatalog === 'mep')
   const activeLayerId = useMemo(() => `${activeCatalog}\t${activeSystemId}`, [activeCatalog, activeSystemId])
   const activeCellPaintKind: 'floor' | 'stairs' = placeMode === 'stairs' ? 'stairs' : 'floor'
   const isCellPaintMode = placeMode === 'floor' || placeMode === 'stairs'
@@ -963,6 +684,7 @@ export function PlanLayoutEditor({
     () => computeEnclosedRoomComponents(siteNx, siteNy, roomBarrierKeys),
     [siteNx, siteNy, roomBarrierKeys],
   )
+  const roomCellKeyIndex = useMemo(() => buildPlanRoomCellKeyIndex(enclosedRooms), [enclosedRooms])
 
   useEffect(() => {
     if (placeMode !== 'room' || roomTool !== 'select') {
@@ -972,13 +694,24 @@ export function PlanLayoutEditor({
 
   useEffect(() => {
     if (!selectedRoomZoneCellKeys?.length || !onRoomZoneSelect) return
-    const comp = findRoomComponentForCellKey(enclosedRooms, selectedRoomZoneCellKeys[0]!)
-    const keysMatch =
-      comp &&
-      comp.cellKeys.length === selectedRoomZoneCellKeys.length &&
-      selectedRoomZoneCellKeys.every((k) => comp.cellKeys.includes(k))
-    if (!keysMatch) onRoomZoneSelect(null)
-  }, [enclosedRooms, selectedRoomZoneCellKeys, onRoomZoneSelect])
+    const entry = roomCellKeyIndex.get(selectedRoomZoneCellKeys[0]!)
+    const comp = entry?.room
+    if (!comp) {
+      onRoomZoneSelect(null)
+      return
+    }
+    if (comp.cellKeys.length !== selectedRoomZoneCellKeys.length) {
+      onRoomZoneSelect(null)
+      return
+    }
+    const inComp = new Set(comp.cellKeys)
+    for (let i = 0; i < selectedRoomZoneCellKeys.length; i++) {
+      if (!inComp.has(selectedRoomZoneCellKeys[i]!)) {
+        onRoomZoneSelect(null)
+        return
+      }
+    }
+  }, [roomCellKeyIndex, selectedRoomZoneCellKeys, onRoomZoneSelect])
 
   const maxDistIn = useMemo(() => {
     const pxToIn = 1 / Math.max(d.planScale, 1e-6)
@@ -986,6 +719,64 @@ export function PlanLayoutEditor({
   }, [d.planScale, pickTolerancePx, zoom])
 
   const cellPx = delta * d.planScale
+
+  const selectedRoomZoneOutlineSegs = useMemo(() => {
+    if (!selectedRoomZoneCellKeys?.length) return null
+    return planRoomZoneOutlineSegments(selectedRoomZoneCellKeys, cellPx)
+  }, [selectedRoomZoneCellKeys, cellPx])
+
+  useLayoutEffect(() => {
+    const req = roomZoneCameraRequest
+    if (!req?.cellKeys.length) return
+    let minI = Infinity
+    let maxI = -Infinity
+    let minJ = Infinity
+    let maxJ = -Infinity
+    for (const k of req.cellKeys) {
+      const parts = k.split(':')
+      if (parts.length !== 2) continue
+      const i = Number(parts[0])
+      const j = Number(parts[1])
+      if (!Number.isFinite(i) || !Number.isFinite(j)) continue
+      minI = Math.min(minI, i)
+      maxI = Math.max(maxI, i)
+      minJ = Math.min(minJ, j)
+      maxJ = Math.max(maxJ, j)
+    }
+    if (!Number.isFinite(minI)) return
+
+    const scroll = scrollRef.current
+    const plan = planBoxRef.current
+    if (!scroll || !plan) return
+    const vpW = scroll.clientWidth
+    const vpH = scroll.clientHeight
+    if (vpW <= 1 || vpH <= 1) return
+
+    const pad = cellPx * 0.35
+    const bw = Math.max((maxI - minI + 1) * cellPx + 2 * pad, cellPx)
+    const bh = Math.max((maxJ - minJ + 1) * cellPx + 2 * pad, cellPx)
+    const cx = ((minI + maxI + 1) / 2) * cellPx
+    const cy = ((minJ + maxJ + 1) / 2) * cellPx
+
+    const margin = 0.88
+    const z1 = clampZoom(Math.min((vpW * margin) / bw, (vpH * margin) / bh, ZOOM_MAX))
+
+    zoomCommitRef.current = null
+    flushSync(() => {
+      setZoom(z1)
+    })
+
+    const sr = scroll.getBoundingClientRect()
+    const pr = plan.getBoundingClientRect()
+    const z = z1
+    scroll.scrollLeft += pr.left + cx * z - sr.left - sr.width / 2
+    scroll.scrollTop += pr.top + cy * z - sr.top - sr.height / 2
+
+    const maxL = Math.max(0, scroll.scrollWidth - scroll.clientWidth)
+    const maxT = Math.max(0, scroll.scrollHeight - scroll.clientHeight)
+    scroll.scrollLeft = Math.max(0, Math.min(maxL, scroll.scrollLeft))
+    scroll.scrollTop = Math.max(0, Math.min(maxT, scroll.scrollTop))
+  }, [roomZoneCameraRequest, cellPx, setZoom])
 
   /** SVG paint order: thicker strokes first (under), thinner last (on top). Room boundaries merge here only while Room mode is active (otherwise drawn as thin underlay under floor/grid). */
   const planLinesPaintOrder = useMemo(() => {
@@ -1142,13 +933,64 @@ export function PlanLayoutEditor({
   )
 
   const deleteSelectedItems = useCallback(() => {
+    if (
+      isElevationCanvas &&
+      annotationTool === 'groundLine' &&
+      sketch.elevationGroundPlaneJ != null
+    ) {
+      onSketchChange({ ...sketch, elevationGroundPlaneJ: undefined })
+      return
+    }
     let edges = sketch.edges
     let cells = sketch.cells ?? []
     let nextRoomByCell: Record<string, string> | undefined = sketch.roomByCell
     let changed = false
+    if (annotationToolActive && annotationTool === 'select' && selectedAnnotationKeys.size > 0) {
+      const dimIds = new Set<string>()
+      const gridIds = new Set<string>()
+      const secIds = new Set<string>()
+      const lblIds = new Set<string>()
+      const lvlIds = new Set<string>()
+      for (const key of selectedAnnotationKeys) {
+        if (key.startsWith('dim:')) dimIds.add(key.slice(4))
+        else if (key.startsWith('grid:')) gridIds.add(key.slice(5))
+        else if (key.startsWith('sec:')) secIds.add(key.slice(4))
+        else if (key.startsWith('lbl:')) lblIds.add(key.slice(4))
+        else if (key.startsWith('lvl:')) lvlIds.add(key.slice(4))
+      }
+      const nextMeasure = (sketch.measureRuns ?? []).filter((r) => !dimIds.has(r.id))
+      const nextGrid = (sketch.annotationGridRuns ?? []).filter((r) => !gridIds.has(r.id))
+      const nextSec = (sketch.annotationSectionCuts ?? []).filter((c) => !secIds.has(c.id))
+      const nextLab = (sketch.annotationLabels ?? []).filter((l) => !lblIds.has(l.id))
+      const nextLvl = (sketch.elevationLevelLines ?? []).filter((l) => !lvlIds.has(l.id))
+      setSelectedAnnotationKeys(new Set())
+      onSketchChange({
+        ...sketch,
+        measureRuns: nextMeasure.length > 0 ? nextMeasure : undefined,
+        annotationGridRuns: nextGrid.length > 0 ? nextGrid : undefined,
+        annotationSectionCuts: nextSec.length > 0 ? nextSec : undefined,
+        annotationLabels: nextLab.length > 0 ? nextLab : undefined,
+        elevationLevelLines: nextLvl.length > 0 ? nextLvl : undefined,
+      })
+      return
+    }
+    if (placeMode === 'column' && floorTool === 'select' && selectedColumnKeys.size > 0) {
+      const rm = selectedColumnKeys
+      const nextCols = (sketch.columns ?? []).filter((c) => !rm.has(placedColumnKey(c)))
+      setSelectedColumnKeys(new Set())
+      onSketchChange({
+        ...sketch,
+        columns: nextCols.length > 0 ? nextCols : undefined,
+      })
+      return
+    }
     if (structureTool === 'select' && selectedEdgeKeys.size > 0) {
       const rm = selectedEdgeKeys
-      edges = edges.filter((ed) => !rm.has(placedEdgeKey(ed)))
+      edges = edges.filter((ed) => {
+        if (!rm.has(placedEdgeKey(ed))) return true
+        if (!allowMepEditing && (ed.source ?? 'arch') === 'mep') return true
+        return false
+      })
       setSelectedEdgeKeys(new Set())
       changed = true
     }
@@ -1193,8 +1035,16 @@ export function PlanLayoutEditor({
     selectedCellKeys,
     selectedRoomEdgeKeys,
     selectedRoomZoneCellKeys,
+    selectedColumnKeys,
     onRoomZoneSelect,
     onSketchChange,
+    annotationToolActive,
+    annotationTool,
+    selectedAnnotationKeys.size,
+    allowMepEditing,
+    isElevationCanvas,
+    sketch.elevationGroundPlaneJ,
+    annotationTool,
   ])
 
   useEffect(() => {
@@ -1209,7 +1059,7 @@ export function PlanLayoutEditor({
       if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement) return
 
       if (e.key === 'Escape') {
-        if (measureToolActive) {
+        if (annotationToolActive && annotationTool === 'measureLine') {
           onSketchChange({ ...sketch, measureRuns: [] })
           setMeasurePreviewNodes(null)
           return
@@ -1220,19 +1070,34 @@ export function PlanLayoutEditor({
         setSelectedEdgeKeys(new Set())
         setSelectedCellKeys(new Set())
         setSelectedRoomEdgeKeys(new Set())
+        setSelectedAnnotationKeys(new Set())
+        setSelectedColumnKeys(new Set())
         setColumnPaintPreview(null)
         onRoomZoneSelect?.(null)
         return
       }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (
+          isElevationCanvas &&
+          annotationTool === 'groundLine' &&
+          sketch.elevationGroundPlaneJ != null
+        ) {
+          e.preventDefault()
+          onSketchChange({ ...sketch, elevationGroundPlaneJ: undefined })
+          return
+        }
+        const canDelAnnotations =
+          annotationToolActive && annotationTool === 'select' && selectedAnnotationKeys.size > 0
         const canDelEdges = structureTool === 'select' && selectedEdgeKeys.size > 0
         const canDelCells = floorTool === 'select' && selectedCellKeys.size > 0
+        const canDelColumns =
+          placeMode === 'column' && floorTool === 'select' && selectedColumnKeys.size > 0
         const canDelRoom =
           placeMode === 'room' &&
           roomTool === 'select' &&
           (selectedRoomEdgeKeys.size > 0 || !!selectedRoomZoneCellKeys?.length)
-        if (canDelEdges || canDelCells || canDelRoom) {
+        if (canDelAnnotations || canDelEdges || canDelCells || canDelColumns || canDelRoom) {
           e.preventDefault()
           deleteSelectedItems()
         }
@@ -1257,27 +1122,40 @@ export function PlanLayoutEditor({
   }, [
     deleteSelectedItems,
     endPaintStroke,
-    measureToolActive,
+    annotationToolActive,
+    annotationTool,
     onSketchChange,
     sketch,
     selectedEdgeKeys.size,
     selectedCellKeys.size,
     selectedRoomEdgeKeys.size,
     selectedRoomZoneCellKeys?.length,
+    selectedColumnKeys.size,
     placeMode,
     roomTool,
     structureTool,
     floorTool,
     onRoomZoneSelect,
+    selectedAnnotationKeys.size,
+    annotationTool,
+    annotationToolActive,
+    isElevationCanvas,
+    sketch.elevationGroundPlaneJ,
+    annotationTool,
   ])
 
   const assignEdge = useCallback(
     (key: { i: number; j: number; axis: 'h' | 'v' }) => {
+      if (blockMepMutations) return
       const k = edgeKeyString(key)
       const layer = `${edgePlacementSource}\t${activeSystemId}`
       if (structureTool === 'erase') {
         updateEdges((list) =>
-          list.filter((e) => !(edgeKeyString(e) === k && layerIdentityFromEdge(e) === activeLayerId)),
+          list.filter((e) => {
+            if (edgeKeyString(e) !== k) return true
+            if (placementKind() === 'wall' && isExclusiveArchWallSegmentStroke(e)) return false
+            return layerIdentityFromEdge(e) !== activeLayerId
+          }),
         )
         return
       }
@@ -1288,9 +1166,12 @@ export function PlanLayoutEditor({
         kind: placementKind(),
       }
       updateEdges((list) => {
-        const filtered = list.filter(
-          (e) => !(edgeKeyString(e) === k && layerIdentityFromEdge(e) === layer),
-        )
+        const filtered = list.filter((e) => {
+          if (edgeKeyString(e) !== k) return true
+          if (layerIdentityFromEdge(e) === layer) return false
+          if (isExclusiveArchWallSegmentStroke(placed) && isExclusiveArchWallSegmentStroke(e)) return false
+          return true
+        })
         filtered.push(placed)
         return filtered
       })
@@ -1302,11 +1183,13 @@ export function PlanLayoutEditor({
       placementKind,
       updateEdges,
       activeLayerId,
+      blockMepMutations,
     ],
   )
 
   const applyNodeChainWalls = useCallback(
     (i0: number, j0: number, i1: number, j1: number) => {
+      if (blockMepMutations) return false
       const seg = edgesInNodeSpan(i0, j0, i1, j1)
       if (seg.length === 0) return false
       const valid = seg.every((k) => {
@@ -1326,18 +1209,24 @@ export function PlanLayoutEditor({
         for (const p of placed) {
           const ek = edgeKeyString(p)
           const lid = layerIdentityFromEdge(p)
-          next = next.filter((e) => !(edgeKeyString(e) === ek && layerIdentityFromEdge(e) === lid))
+          next = next.filter((e) => {
+            if (edgeKeyString(e) !== ek) return true
+            if (layerIdentityFromEdge(e) === lid) return false
+            if (isExclusiveArchWallSegmentStroke(p) && isExclusiveArchWallSegmentStroke(e)) return false
+            return true
+          })
         }
         next = next.concat(placed)
         return next
       })
       return true
     },
-    [siteNx, siteNy, activeSystemId, edgePlacementSource, placementKind, updateEdges],
+    [siteNx, siteNy, activeSystemId, edgePlacementSource, placementKind, updateEdges, blockMepMutations],
   )
 
   const removeNodeChainWalls = useCallback(
     (i0: number, j0: number, i1: number, j1: number) => {
+      if (blockMepMutations) return false
       const seg = edgesInNodeSpan(i0, j0, i1, j1)
       if (seg.length === 0) return false
       const valid = seg.every((k) => {
@@ -1347,15 +1236,20 @@ export function PlanLayoutEditor({
       if (!valid) return false
       const keys = new Set(seg.map((k) => edgeKeyString(k)))
       updateEdges((list) =>
-        list.filter((e) => !(keys.has(edgeKeyString(e)) && layerIdentityFromEdge(e) === activeLayerId)),
+        list.filter((e) => {
+          if (!keys.has(edgeKeyString(e))) return true
+          if (placementKind() === 'wall' && isExclusiveArchWallSegmentStroke(e)) return false
+          return layerIdentityFromEdge(e) !== activeLayerId
+        }),
       )
       return true
     },
-    [siteNx, siteNy, updateEdges, activeLayerId],
+    [siteNx, siteNy, updateEdges, activeLayerId, placementKind, blockMepMutations],
   )
 
   const applyWallStrokeKeys = useCallback(
     (keys: GridEdgeKey[]) => {
+      if (blockMepMutations) return
       if (keys.length === 0) return
       const valid = keys.every((k) => {
         if (k.axis === 'h') return k.i >= 0 && k.i < siteNx && k.j >= 0 && k.j <= siteNy
@@ -1365,9 +1259,11 @@ export function PlanLayoutEditor({
       if (structureTool === 'erase') {
         const rm = new Set(keys.map(edgeKeyString))
         updateEdges((list) =>
-          list.filter(
-            (e) => !(rm.has(edgeKeyString(e)) && layerIdentityFromEdge(e) === activeLayerId),
-          ),
+          list.filter((e) => {
+            if (!rm.has(edgeKeyString(e))) return true
+            if (placementKind() === 'wall' && isExclusiveArchWallSegmentStroke(e)) return false
+            return layerIdentityFromEdge(e) !== activeLayerId
+          }),
         )
         return
       }
@@ -1383,7 +1279,12 @@ export function PlanLayoutEditor({
         for (const p of placed) {
           const ek = edgeKeyString(p)
           const lid = layerIdentityFromEdge(p)
-          next = next.filter((e) => !(edgeKeyString(e) === ek && layerIdentityFromEdge(e) === lid))
+          next = next.filter((e) => {
+            if (edgeKeyString(e) !== ek) return true
+            if (layerIdentityFromEdge(e) === lid) return false
+            if (isExclusiveArchWallSegmentStroke(p) && isExclusiveArchWallSegmentStroke(e)) return false
+            return true
+          })
           next.push(p)
         }
         return next
@@ -1398,6 +1299,7 @@ export function PlanLayoutEditor({
       edgePlacementSource,
       updateEdges,
       activeLayerId,
+      blockMepMutations,
     ],
   )
 
@@ -1426,7 +1328,7 @@ export function PlanLayoutEditor({
         isEdgeLayerMode && (structureTool === 'paint' || structureTool === 'erase')
       const shiftChainRoom =
         placeMode === 'room' && (roomTool === 'paint' || roomTool === 'erase')
-      if (measureToolActive || suspendPlanPainting || (!shiftChainStructure && !shiftChainRoom)) {
+      if (annotationToolActive || suspendPlanPainting || (!shiftChainStructure && !shiftChainRoom)) {
         clear()
         return false
       }
@@ -1446,7 +1348,7 @@ export function PlanLayoutEditor({
         clear()
         return false
       }
-      const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, maxDistIn * 1.2)
+      const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, wallLineDragEndSnapDistIn(maxDistIn, delta))
       if (!endNode) {
         clear()
         return false
@@ -1460,6 +1362,7 @@ export function PlanLayoutEditor({
         })
       if (valid) {
         setWallLinePreviewKeys(keys.map(edgeKeyString))
+        setWallLinePreviewRubberPlanIn(wallPreviewRubberPlanInFrom(endNode, pin, delta))
         setMeasurePreviewNodes({ start: last, end: endNode })
         setChainLineErasePreview(
           shiftChainStructure ? structureTool === 'erase' : roomTool === 'erase',
@@ -1470,7 +1373,7 @@ export function PlanLayoutEditor({
       return false
     },
     [
-      measureToolActive,
+      annotationToolActive,
       isEdgeLayerMode,
       placeMode,
       roomTool,
@@ -1530,7 +1433,9 @@ export function PlanLayoutEditor({
           dk === 'column-marquee' ||
           dk === 'select-marquee' ||
           dk === 'room-select-marquee' ||
-          dk === 'floor-select-marquee'
+          dk === 'floor-select-marquee' ||
+          dk === 'annotation-select-marquee' ||
+          dk === 'annotation-erase-marquee'
         ) {
           const svg = svgRef.current
           const start = marqueeStartRef.current
@@ -1540,12 +1445,39 @@ export function PlanLayoutEditor({
               const r = clampMarqueeSvgRect(start.x, start.y, p.x, p.y, cw, ch)
               marqueeRectRef.current = r
               setEraseMarqueeSvg(r)
+              if (dk === 'annotation-erase-marquee' && r.w > 0 && r.h > 0) {
+                const ps = d.planScale
+                const minX = r.x / ps
+                const minY = r.y / ps
+                const maxX = (r.x + r.w) / ps
+                const maxY = (r.y + r.h) / ps
+                const picked = annotationKeysIntersectingPlanRect(
+                  sketchRef.current,
+                  minX,
+                  minY,
+                  maxX,
+                  maxY,
+                  delta,
+                  isElevationCanvas,
+                ).sort()
+                setEraseMarqueeAnnotationPreviewKeys((prev) =>
+                  prev &&
+                  prev.length === picked.length &&
+                  picked.every((k, i) => k === prev[i]!)
+                    ? prev
+                    : picked,
+                )
+              } else if (dk === 'annotation-erase-marquee') {
+                setEraseMarqueeAnnotationPreviewKeys(null)
+              }
             }
           }
           setHoverEdge(null)
           setHoverCell(null)
           setWallLinePreviewKeys(null)
           setMeasurePreviewNodes(null)
+          setHoverAnnotationSelectKey(null)
+          setHoverAnnotationEraseKey(null)
           return
         }
         if (dk === 'move-edges') {
@@ -1616,6 +1548,7 @@ export function PlanLayoutEditor({
           setMeasurePreviewNodes(null)
           setChainLineErasePreview(false)
           setColumnPaintPreview(null)
+          setHoverAnnotationSelectKey(null)
         }
         return
       }
@@ -1624,6 +1557,32 @@ export function PlanLayoutEditor({
         pin.xIn >= 0 && pin.yIn >= 0 && pin.xIn <= siteWIn && pin.yIn <= siteHIn
 
       const dkLine = dragKindRef.current
+      if (paintDragRef.current && inside && dkLine === 'section-cut-line' && annotationToolActive) {
+        const start = wallLineDragStartRef.current
+        if (!start) {
+          setHoverEdge(null)
+          setHoverCell(null)
+          return
+        }
+        const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, wallLineDragEndSnapDistIn(maxDistIn, delta))
+        setWallLinePreviewKeys(null)
+        if (
+          endNode &&
+          (endNode.i !== start.i || endNode.j !== start.j) &&
+          endNode.i >= 0 &&
+          endNode.j >= 0 &&
+          endNode.i <= siteNx &&
+          endNode.j <= siteNy
+        ) {
+          setMeasurePreviewNodes({ start, end: endNode })
+        } else {
+          setMeasurePreviewNodes(null)
+        }
+        setHoverEdge(null)
+        setHoverCell(null)
+        return
+      }
+
       if (
         paintDragRef.current &&
         inside &&
@@ -1631,7 +1590,8 @@ export function PlanLayoutEditor({
           (dkLine === 'chain-line' && isEdgeLayerMode) ||
           (dkLine === 'room-line' && isRoomBoundaryEdgeMode) ||
           (dkLine === 'room-chain-line' && isRoomBoundaryEdgeMode) ||
-          (dkLine === 'measure-line' && measureToolActive && measureTool === 'line'))
+          ((dkLine === 'measure-line' && annotationToolActive && annotationTool === 'measureLine') ||
+            (dkLine === 'annotation-grid-line' && annotationToolActive && annotationTool === 'gridLine')))
       ) {
         const start = wallLineDragStartRef.current
         if (!start) {
@@ -1639,7 +1599,7 @@ export function PlanLayoutEditor({
           setHoverCell(null)
           return
         }
-        const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, maxDistIn * 1.2)
+        const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, wallLineDragEndSnapDistIn(maxDistIn, delta))
         if (!endNode) {
           setWallLinePreviewKeys(null)
           setMeasurePreviewNodes(null)
@@ -1665,9 +1625,24 @@ export function PlanLayoutEditor({
           return k.i >= 0 && k.i <= siteNx && k.j >= 0 && k.j < siteNy
         })
         if (valid && keys.length > 0) {
-          setWallLinePreviewKeys(keys.map(edgeKeyString))
+          const nextPv = keys.map(edgeKeyString)
+          setWallLinePreviewKeys((prev) => {
+            if (prev && prev.length === nextPv.length) {
+              let same = true
+              for (let i = 0; i < prev.length; i++) {
+                if (prev[i] !== nextPv[i]) {
+                  same = false
+                  break
+                }
+              }
+              if (same) return prev
+            }
+            return nextPv
+          })
+          setWallLinePreviewRubberPlanIn(wallPreviewRubberPlanInFrom(endNode, pin, delta))
           if (
             dkLine === 'measure-line' ||
+            dkLine === 'annotation-grid-line' ||
             dkLine === 'wall-line' ||
             dkLine === 'chain-line' ||
             dkLine === 'room-line' ||
@@ -1681,6 +1656,7 @@ export function PlanLayoutEditor({
           setWallLinePreviewKeys(null)
           if (
             dkLine === 'measure-line' ||
+            dkLine === 'annotation-grid-line' ||
             dkLine === 'wall-line' ||
             dkLine === 'chain-line' ||
             dkLine === 'room-line' ||
@@ -1730,7 +1706,47 @@ export function PlanLayoutEditor({
           setWallLinePreviewKeys(null)
           setMeasurePreviewNodes(null)
           setChainLineErasePreview(false)
+          setHoverAnnotationSelectKey(null)
+          setHoverAnnotationEraseKey(null)
         }
+        return
+      }
+
+      if (!paintDragRef.current && annotationToolActive && annotationTool === 'erase' && inside) {
+        const h = annotationHitKeyAtPlanInches(
+          pin,
+          sketch,
+          siteWIn,
+          siteHIn,
+          delta,
+          maxDistIn,
+          isElevationCanvas,
+        )
+        setHoverAnnotationEraseKey((prev) => (prev === h ? prev : h))
+        setHoverEdge(null)
+        setHoverCell(null)
+        setColumnPaintPreview(null)
+        return
+      }
+
+      if (
+        !paintDragRef.current &&
+        annotationToolActive &&
+        annotationTool === 'select'
+      ) {
+        const h = annotationHitKeyAtPlanInches(
+          pin,
+          sketch,
+          siteWIn,
+          siteHIn,
+          delta,
+          maxDistIn,
+          isElevationCanvas,
+        )
+        setHoverAnnotationSelectKey((prev) => (prev === h ? prev : h))
+        setHoverEdge(null)
+        setHoverCell(null)
+        setColumnPaintPreview(null)
         return
       }
 
@@ -1738,7 +1754,7 @@ export function PlanLayoutEditor({
         !paintDragRef.current &&
         e.shiftKey &&
         !suspendPlanPainting &&
-        !measureToolActive &&
+        !annotationToolActive &&
         ((isEdgeLayerMode && (structureTool === 'paint' || structureTool === 'erase')) ||
           (isRoomBoundaryEdgeMode && (roomTool === 'paint' || roomTool === 'erase')))
 
@@ -1788,7 +1804,7 @@ export function PlanLayoutEditor({
           floorTool === 'paint' &&
           activeCatalog === 'arch' &&
           !suspendPlanPainting &&
-          !measureToolActive
+          !annotationToolActive
         ) {
           const snapped = snapPlanInchesToGridNode(pin.xIn, pin.yIn, delta, siteNx, siteNy)
           const sys = orderedSystems.find((s) => s.id === activeSystemId)
@@ -1838,12 +1854,17 @@ export function PlanLayoutEditor({
       activeLayerId,
       cw,
       ch,
-      measureToolActive,
+      annotationToolActive,
+      annotationTool,
       suspendPlanPainting,
       updateShiftChainHoverPreview,
       structureTool,
       floorTool,
       orderedSystems,
+      sketch,
+      d.planScale,
+      delta,
+      isElevationCanvas,
     ],
   )
 
@@ -1854,10 +1875,23 @@ export function PlanLayoutEditor({
   )
 
   const onPointerLeave = useCallback(() => {
+    // Active drags use pointer capture; leaving the SVG bbox still fires leave on the
+    // element. Do not reset drag state here or marquee erase / box tools never commit.
+    if (paintDragRef.current) {
+      setHoverEdge(null)
+      setHoverCell(null)
+      setColumnPaintPreview(null)
+      setHoverAnnotationSelectKey(null)
+      setHoverAnnotationEraseKey(null)
+      return
+    }
     endPaintStroke()
     setHoverEdge(null)
     setHoverCell(null)
     setColumnPaintPreview(null)
+    setHoverAnnotationSelectKey(null)
+    setHoverAnnotationEraseKey(null)
+    setEraseMarqueeAnnotationPreviewKeys(null)
   }, [endPaintStroke])
 
   const onPointerUpOrCancel = useCallback(
@@ -1879,7 +1913,7 @@ export function PlanLayoutEditor({
         const snap = moveEdgesSnapshotRef.current
         const hitKey = moveHitEdgeKeyRef.current
         const pinF = pin ?? start
-        const thr = MOVE_CLICK_MAX_PLAN_IN(delta)
+        const thr = moveClickMaxPlanIn(delta)
         if (snap && start && pinF) {
           const movedFar =
             Math.abs(pinF.xIn - start.xIn) >= thr || Math.abs(pinF.yIn - start.yIn) >= thr
@@ -1892,6 +1926,11 @@ export function PlanLayoutEditor({
           } else {
             const { di, dj } = movePreviewDiDjRef.current
             if ((di !== 0 || dj !== 0) && snap.length > 0) {
+              if (!allowMepEditing && snap.some((ed) => (ed.source ?? 'arch') === 'mep')) {
+                endPaintStroke()
+                release()
+                return
+              }
               const movePlaced = new Set(snap.map(placedEdgeKey))
               let merged = sketch.edges.filter((ed) => !movePlaced.has(placedEdgeKey(ed)))
               for (const edge of snap) {
@@ -1916,7 +1955,7 @@ export function PlanLayoutEditor({
         const snap = moveRoomEdgesSnapshotRef.current
         const hitKey = moveHitEdgeKeyRef.current
         const pinF = pin ?? start
-        const thr = MOVE_CLICK_MAX_PLAN_IN(delta)
+        const thr = moveClickMaxPlanIn(delta)
         if (snap && start && pinF) {
           const movedFar =
             Math.abs(pinF.xIn - start.xIn) >= thr || Math.abs(pinF.yIn - start.yIn) >= thr
@@ -1960,7 +1999,7 @@ export function PlanLayoutEditor({
         const snap = moveCellsSnapshotRef.current
         const hitKey = moveHitCellKeyRef.current
         const pinF = pin ?? start
-        const thr = MOVE_CLICK_MAX_PLAN_IN(delta)
+        const thr = moveClickMaxPlanIn(delta)
         if (snap && start && pinF) {
           const movedFar =
             Math.abs(pinF.xIn - start.xIn) >= thr || Math.abs(pinF.yIn - start.yIn) >= thr
@@ -2076,6 +2115,112 @@ export function PlanLayoutEditor({
               })
             } else if (!shift) {
               setSelectedEdgeKeys(new Set())
+            }
+          }
+        }
+        endPaintStroke()
+        release()
+        return
+      }
+
+      if (kind === 'annotation-select-marquee') {
+        const mr = marqueeRectRef.current
+        const shift = e.shiftKey
+        if (mr) {
+          const tiny = mr.w < MARQUEE_CLICK_MAX_PX && mr.h < MARQUEE_CLICK_MAX_PX
+          if (tiny) {
+            if (pin && insideSite(pin.xIn, pin.yIn)) {
+              const hit = annotationHitKeyAtPlanInches(
+                pin,
+                sketch,
+                siteWIn,
+                siteHIn,
+                delta,
+                maxDistIn,
+                isElevationCanvas,
+              )
+              if (hit) {
+                setSelectedAnnotationKeys((prev) => {
+                  if (shift) {
+                    const n = new Set(prev)
+                    if (n.has(hit)) n.delete(hit)
+                    else n.add(hit)
+                    return n
+                  }
+                  return new Set([hit])
+                })
+              } else if (!shift) {
+                setSelectedAnnotationKeys(new Set())
+              }
+            } else if (!shift) {
+              setSelectedAnnotationKeys(new Set())
+            }
+          } else if (mr.w > 0 && mr.h > 0) {
+            const minX = mr.x / d.planScale
+            const minY = mr.y / d.planScale
+            const maxX = (mr.x + mr.w) / d.planScale
+            const maxY = (mr.y + mr.h) / d.planScale
+            const picked = annotationKeysIntersectingPlanRect(
+              sketch,
+              minX,
+              minY,
+              maxX,
+              maxY,
+              delta,
+              isElevationCanvas,
+            )
+            if (picked.length > 0) {
+              setSelectedAnnotationKeys((prev) => {
+                if (shift) return new Set([...prev, ...picked])
+                return new Set(picked)
+              })
+            } else if (!shift) {
+              setSelectedAnnotationKeys(new Set())
+            }
+          }
+        }
+        endPaintStroke()
+        release()
+        return
+      }
+
+      if (kind === 'annotation-erase-marquee') {
+        const mr = marqueeRectRef.current
+        if (mr) {
+          const tiny = mr.w < MARQUEE_CLICK_MAX_PX && mr.h < MARQUEE_CLICK_MAX_PX
+          if (tiny) {
+            if (pin && insideSite(pin.xIn, pin.yIn)) {
+              const hit = annotationHitKeyAtPlanInches(
+                pin,
+                sketch,
+                siteWIn,
+                siteHIn,
+                delta,
+                maxDistIn,
+                isElevationCanvas,
+              )
+              if (hit) {
+                const next = nextSketchAfterRemovingAnnotationKeys(sketch, [hit])
+                if (next) onSketchChange(next)
+              }
+            }
+          } else if (mr.w > 0 && mr.h > 0) {
+            const minX = mr.x / d.planScale
+            const minY = mr.y / d.planScale
+            const maxX = (mr.x + mr.w) / d.planScale
+            const maxY = (mr.y + mr.h) / d.planScale
+            const picked = annotationKeysIntersectingPlanRect(
+              sketch,
+              minX,
+              minY,
+              maxX,
+              maxY,
+              delta,
+              isElevationCanvas,
+            )
+            if (picked.length > 0) {
+              const next = nextSketchAfterRemovingAnnotationKeys(sketch, picked)
+              if (next) onSketchChange(next)
             }
           }
         }
@@ -2224,9 +2369,11 @@ export function PlanLayoutEditor({
               if (hit) {
                 const hk = edgeKeyString(hit)
                 updateEdges((list) =>
-                  list.filter(
-                    (ed) => !(edgeKeyString(ed) === hk && layerIdentityFromEdge(ed) === activeLayerId),
-                  ),
+                  list.filter((ed) => {
+                    if (edgeKeyString(ed) !== hk) return true
+                    if (placementKind() === 'wall' && isExclusiveArchWallSegmentStroke(ed)) return false
+                    return layerIdentityFromEdge(ed) !== activeLayerId
+                  }),
                 )
               }
             }
@@ -2236,11 +2383,11 @@ export function PlanLayoutEditor({
             const maxX = (mr.x + mr.w) / d.planScale
             const maxY = (mr.y + mr.h) / d.planScale
             updateEdges((list) =>
-              list.filter(
-                (ed) =>
-                  !gridEdgeIntersectsPlanRect(ed, delta, minX, minY, maxX, maxY) ||
-                  layerIdentityFromEdge(ed) !== activeLayerId,
-              ),
+              list.filter((ed) => {
+                if (!gridEdgeIntersectsPlanRect(ed, delta, minX, minY, maxX, maxY)) return true
+                if (placementKind() === 'wall' && isExclusiveArchWallSegmentStroke(ed)) return false
+                return layerIdentityFromEdge(ed) !== activeLayerId
+              }),
             )
           }
         }
@@ -2450,14 +2597,9 @@ export function PlanLayoutEditor({
       }
 
       if (kind === 'measure-line') {
-        if (measureTool !== 'line') {
-          endPaintStroke()
-          release()
-          return
-        }
         const startSnap = wallLineDragStartRef.current
         if (startSnap && pin && insideSite(pin.xIn, pin.yIn)) {
-          const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, maxDistIn * 1.2)
+          const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, wallLineDragEndSnapDistIn(maxDistIn, delta))
           const keys = endNode
             ? manhattanWallPathEdges(
                 startSnap.i,
@@ -2497,10 +2639,80 @@ export function PlanLayoutEditor({
         return
       }
 
+      if (kind === 'annotation-grid-line') {
+        const startSnap = wallLineDragStartRef.current
+        if (startSnap && pin && insideSite(pin.xIn, pin.yIn)) {
+          const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, wallLineDragEndSnapDistIn(maxDistIn, delta))
+          const keys = endNode
+            ? manhattanWallPathEdges(
+                startSnap.i,
+                startSnap.j,
+                endNode.i,
+                endNode.j,
+                e.shiftKey,
+                pin.xIn,
+                pin.yIn,
+                delta,
+              )
+            : []
+          const valid =
+            keys.length > 0 &&
+            keys.every((k) => {
+              if (k.axis === 'h') return k.i >= 0 && k.i < siteNx && k.j >= 0 && k.j <= siteNy
+              return k.i >= 0 && k.i <= siteNx && k.j >= 0 && k.j < siteNy
+            })
+          if (valid) {
+            const id = `g-${++annotationGridRunIdRef.current}`
+            const run: PlanAnnotationGridRun = {
+              id,
+              edgeKeys: keys.map(edgeKeyString),
+            }
+            onSketchChange({
+              ...sketch,
+              annotationGridRuns: [...(sketch.annotationGridRuns ?? []), run],
+            })
+            lastWallNodeRef.current = endNode
+          }
+        }
+        endPaintStroke()
+        release()
+        return
+      }
+
+      if (kind === 'section-cut-line') {
+        const startSnap = wallLineDragStartRef.current
+        if (startSnap && pin && insideSite(pin.xIn, pin.yIn)) {
+          const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, wallLineDragEndSnapDistIn(maxDistIn, delta))
+          if (
+            endNode &&
+            (endNode.i !== startSnap.i || endNode.j !== startSnap.j) &&
+            endNode.i >= 0 &&
+            endNode.j >= 0 &&
+            endNode.i <= siteNx &&
+            endNode.j <= siteNy
+          ) {
+            const id = `sc-${++sectionCutIdRef.current}`
+            const cut: PlanAnnotationSectionCut = {
+              id,
+              startNode: { i: startSnap.i, j: startSnap.j },
+              endNode: { i: endNode.i, j: endNode.j },
+            }
+            onSketchChange({
+              ...sketch,
+              annotationSectionCuts: [...(sketch.annotationSectionCuts ?? []), cut],
+            })
+            lastWallNodeRef.current = endNode
+          }
+        }
+        endPaintStroke()
+        release()
+        return
+      }
+
       if (kind === 'chain-line' && isEdgeLayerMode) {
         const startSnap = wallLineDragStartRef.current
         if (startSnap && pin && insideSite(pin.xIn, pin.yIn)) {
-          const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, maxDistIn * 1.2)
+          const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, wallLineDragEndSnapDistIn(maxDistIn, delta))
           const keys = endNode
             ? edgesInNodeSpan(startSnap.i, startSnap.j, endNode.i, endNode.j)
             : []
@@ -2526,7 +2738,7 @@ export function PlanLayoutEditor({
       if (kind === 'room-chain-line' && isRoomBoundaryEdgeMode) {
         const startSnap = wallLineDragStartRef.current
         if (startSnap && pin && insideSite(pin.xIn, pin.yIn)) {
-          const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, maxDistIn * 1.2)
+          const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, wallLineDragEndSnapDistIn(maxDistIn, delta))
           if (endNode) {
             const ok = applyNodeChainRoomBoundaries(startSnap.i, startSnap.j, endNode.i, endNode.j)
             if (ok) lastWallNodeRef.current = endNode
@@ -2544,7 +2756,7 @@ export function PlanLayoutEditor({
       const startSnap = wallLineDragStartRef.current
 
       if (wasRoomLineDrag && startSnap && pin && insideSite(pin.xIn, pin.yIn)) {
-        const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, maxDistIn * 1.2)
+        const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, wallLineDragEndSnapDistIn(maxDistIn, delta))
         const keys = endNode
           ? manhattanWallPathEdges(
               startSnap.i,
@@ -2583,7 +2795,7 @@ export function PlanLayoutEditor({
       }
 
       if (wasStructureWallDrag && startSnap && pin && insideSite(pin.xIn, pin.yIn)) {
-        const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, maxDistIn * 1.2)
+        const endNode = nodeUnderCursor(pin.xIn, pin.yIn, delta, siteNx, siteNy, wallLineDragEndSnapDistIn(maxDistIn, delta))
         const keys = endNode
           ? manhattanWallPathEdges(
               startSnap.i,
@@ -2651,12 +2863,13 @@ export function PlanLayoutEditor({
       cellsGeomMap,
       activeLayerId,
       activeCatalog,
-      measureTool,
       isRoomBoundaryEdgeMode,
       applyRoomBoundaryStrokeKeys,
       assignRoomBoundaryEdge,
       applyNodeChainRoomBoundaries,
       updateRoomBoundaries,
+      isElevationCanvas,
+      placementKind,
     ],
   )
 
@@ -2665,28 +2878,46 @@ export function PlanLayoutEditor({
       if (suspendPlanPainting) return
       const svg = e.currentTarget as SVGSVGElement
 
-      if (measureToolActive) {
-        const pinM = pointerToPlanInches(e.clientX, e.clientY)
-        if (!pinM || !insideSite(pinM.xIn, pinM.yIn)) return
+      if (isElevationCanvas && !annotationToolActive) return
 
-        if (measureTool === 'erase') {
-          const hitE = nearestGridEdge(
-            pinM.xIn,
-            pinM.yIn,
-            siteWIn,
-            siteHIn,
-            delta,
-            maxDistIn,
-          )
-          if (!hitE) return
-          const k = edgeKeyString(hitE)
-          const runs = sketch.measureRuns ?? []
-          const nextRuns = runs.filter((r) => !r.edgeKeys.includes(k))
-          if (nextRuns.length < runs.length) {
-            onSketchChange({ ...sketch, measureRuns: nextRuns })
+      if (annotationToolActive) {
+        if (isElevationCanvas && annotationTool === 'groundLine') {
+          const pinM = pointerToPlanInches(e.clientX, e.clientY)
+          if (!pinM || !insideSite(pinM.xIn, pinM.yIn)) return
+          const jRaw = Math.round(pinM.yIn / delta)
+          const jClamped = Math.max(0, Math.min(siteNy, jRaw))
+          onSketchChange({ ...sketch, elevationGroundPlaneJ: jClamped })
+          return
+        }
+
+        if (isElevationCanvas && annotationTool === 'levelLine') {
+          const pinM = pointerToPlanInches(e.clientX, e.clientY)
+          if (!pinM || !insideSite(pinM.xIn, pinM.yIn)) return
+          const jRaw = Math.round(pinM.yIn / delta)
+          const jClamped = Math.max(0, Math.min(siteNy, jRaw))
+          const existing = (sketch.elevationLevelLines ?? []).filter((l) => l.j === jClamped)
+          if (existing.length > 0) {
+            const rm = new Set(existing.map((l) => l.id))
+            const next = (sketch.elevationLevelLines ?? []).filter((l) => !rm.has(l.id))
+            onSketchChange({
+              ...sketch,
+              elevationLevelLines: next.length > 0 ? next : undefined,
+            })
+          } else {
+            const id = `ll-${++levelLineIdRef.current}`
+            const labelRaw = levelLineLabelDraft.trim()
+            const label = labelRaw.length > 0 ? labelRaw : undefined
+            onSketchChange({
+              ...sketch,
+              elevationLevelLines: [...(sketch.elevationLevelLines ?? []), { id, j: jClamped, label }],
+            })
           }
           return
         }
+
+        const pSvgAnn = clientToSvgPoint(svg, e.clientX, e.clientY)
+        const onPlanSvgAnn =
+          Boolean(pSvgAnn && pSvgAnn.x >= 0 && pSvgAnn.y >= 0 && pSvgAnn.x <= cw && pSvgAnn.y <= ch)
 
         const tryCaptureM = () => {
           try {
@@ -2696,10 +2927,69 @@ export function PlanLayoutEditor({
           }
         }
 
+        if (annotationTool === 'select') {
+          if (!onPlanSvgAnn || !pSvgAnn) return
+          tryCaptureM()
+          paintDragRef.current = true
+          dragKindRef.current = 'annotation-select-marquee'
+          setWallLinePreviewKeys(null)
+          setMeasurePreviewNodes(null)
+          setMarqueeTone('select')
+          const sx = Math.max(0, Math.min(cw, pSvgAnn.x))
+          const sy = Math.max(0, Math.min(ch, pSvgAnn.y))
+          marqueeStartRef.current = { x: sx, y: sy }
+          const r = { x: sx, y: sy, w: 0, h: 0 }
+          marqueeRectRef.current = r
+          setEraseMarqueeSvg(r)
+          return
+        }
+
+        if (annotationTool === 'erase') {
+          if (!onPlanSvgAnn || !pSvgAnn) return
+          tryCaptureM()
+          paintDragRef.current = true
+          dragKindRef.current = 'annotation-erase-marquee'
+          setWallLinePreviewKeys(null)
+          setMeasurePreviewNodes(null)
+          setMarqueeTone('erase')
+          setEraseMarqueeAnnotationPreviewKeys(null)
+          const sx = Math.max(0, Math.min(cw, pSvgAnn.x))
+          const sy = Math.max(0, Math.min(ch, pSvgAnn.y))
+          marqueeStartRef.current = { x: sx, y: sy }
+          const r = { x: sx, y: sy, w: 0, h: 0 }
+          marqueeRectRef.current = r
+          setEraseMarqueeSvg(r)
+          return
+        }
+
+        const pinM = pointerToPlanInches(e.clientX, e.clientY)
+        if (!pinM || !insideSite(pinM.xIn, pinM.yIn)) return
+
+        if (annotationTool === 'textLabel') {
+          const t = annotationLabelDraft.trim()
+          if (!t) return
+          const id = `t-${++annotationLabelIdRef.current}`
+          onSketchChange({
+            ...sketch,
+            annotationLabels: [...(sketch.annotationLabels ?? []), { id, xIn: pinM.xIn, yIn: pinM.yIn, text: t }],
+          })
+          return
+        }
+
+        const lineDragKind: 'measure-line' | 'annotation-grid-line' | 'section-cut-line' | null =
+          annotationTool === 'measureLine'
+            ? 'measure-line'
+            : annotationTool === 'gridLine'
+              ? 'annotation-grid-line'
+              : annotationTool === 'sectionCut'
+                ? 'section-cut-line'
+                : null
+        if (!lineDragKind) return
+
         if (e.shiftKey && lastWallNodeRef.current) {
           tryCaptureM()
           paintDragRef.current = true
-          dragKindRef.current = 'measure-line'
+          dragKindRef.current = lineDragKind
           wallLineDragStartRef.current = lastWallNodeRef.current
           setWallLinePreviewKeys(null)
           setMeasurePreviewNodes(null)
@@ -2718,7 +3008,7 @@ export function PlanLayoutEditor({
 
         tryCaptureM()
         paintDragRef.current = true
-        dragKindRef.current = 'measure-line'
+        dragKindRef.current = lineDragKind
         const sn = closerNodeOnEdge(hitM, pinM.xIn, pinM.yIn, delta)
         wallLineDragStartRef.current = sn
         setWallLinePreviewKeys(null)
@@ -2733,7 +3023,7 @@ export function PlanLayoutEditor({
         if (!cell) return
         const ck = cellKeyString(cell)
         if (exteriorCells.has(ck)) return
-        const comp = findRoomComponentForCellKey(enclosedRooms, ck)
+        const comp = roomCellKeyIndex.get(ck)?.room
         if (!comp) return
         const prev = sketch.roomByCell ?? {}
         const next: Record<string, string> = { ...prev }
@@ -2827,18 +3117,14 @@ export function PlanLayoutEditor({
               if (cell) {
                 const ckHit = cellKeyString(cell)
                 if (!exteriorCells.has(ckHit)) {
-                  const comp = findRoomComponentForCellKey(enclosedRooms, ckHit)
+                  const zoneHit = roomCellKeyIndex.get(ckHit)
+                  const comp = zoneHit?.room
                   if (
                     comp &&
                     roomZoneHasAssignedName(comp.cellKeys, sketch.roomByCell)
                   ) {
                     setSelectedRoomEdgeKeys(new Set())
-                    const zIdx =
-                      enclosedRooms.findIndex(
-                        (r) =>
-                          r.cellKeys.length === comp.cellKeys.length &&
-                          r.cellKeys.every((k, i) => k === comp.cellKeys[i]!),
-                      ) + 1
+                    const zIdx = zoneHit.index + 1
                     const displayName = resolveRoomDisplayName(
                       comp.cellKeys,
                       sketch.roomByCell,
@@ -3188,11 +3474,12 @@ export function PlanLayoutEditor({
       sketch.edges,
       sketch.cells,
       suspendPlanPainting,
-      measureToolActive,
-      measureTool,
+      annotationToolActive,
+      annotationTool,
+      annotationLabelDraft,
       onSketchChange,
       exteriorCells,
-      enclosedRooms,
+      roomCellKeyIndex,
       roomNameDraft,
       isRoomBoundaryEdgeMode,
       roomTool,
@@ -3201,6 +3488,8 @@ export function PlanLayoutEditor({
       onRoomZoneSelect,
       sketch.roomByCell,
       orderedSystems,
+      isElevationCanvas,
+      levelLineLabelDraft,
     ],
   )
 
@@ -3216,26 +3505,80 @@ export function PlanLayoutEditor({
   const patGridV = `${patternUid}-gv`
   const patGridDots = `${patternUid}-gd`
 
-  const hoverLengthIn = hoverEdge ? delta : 0
-
   const statusLine = useMemo(() => {
       if (suspendPlanPainting) {
       return 'Overlay adjust — plan drawing paused · Done in toolbar returns to Line / Rect / Erase / Select'
     }
-    if (measureToolActive) {
-      if (measureTool === 'erase') {
-        const n = measureRuns.length
-        if (n > 0) {
-          return `${n} dimension run${n === 1 ? '' : 's'} · Click a segment of a run to remove it · Esc clears all`
+    if (annotationToolActive) {
+      if (annotationTool === 'groundLine') {
+        const j = sketch.elevationGroundPlaneJ
+        return j != null
+          ? `Ground line at grid row j=${j} — click to move · Delete clears`
+          : 'Ground line — click the grid to place a horizontal grade (full canvas width)'
+      }
+      if (annotationTool === 'levelLine') {
+        const n = elevationLevelLines.length
+        const tag = levelLineLabelDraft.trim() || '(no tag)'
+        return n > 0
+          ? `Level lines — ${n} on layout · click a row to toggle · new lines use tag “${tag.length > 28 ? `${tag.slice(0, 28)}…` : tag}” from the bar`
+          : `Level line — click grid rows to add full-width datums · tag “${tag.length > 28 ? `${tag.slice(0, 28)}…` : tag}” · click again on a row to remove`
+      }
+      if (annotationTool === 'select') {
+        const n = selectedAnnotationKeys.size
+        const elevPick = isElevationCanvas ? '; level: horizontal datum' : ''
+        return n > 0
+          ? `${n} selected · Shift+click add/remove · drag box to add more · Del removes · Esc clears${
+              n === 1 && Array.from(selectedAnnotationKeys)[0]?.startsWith('lbl:')
+                ? ' · edit label text in the top bar'
+                : ''
+            }`
+          : `Select — hover highlights · click or drag a box · Shift adds/removes · dimensions & grid: edge; section: line${elevPick}; label: anchor · one label selected: edit in top bar`
+      }
+      if (annotationTool === 'erase') {
+        const nd = measureRuns.length
+        const ng = annotationGridRuns.length
+        const ns = annotationSectionCuts.length
+        const nl = annotationLabels.length
+        const nlv = isElevationCanvas ? elevationLevelLines.length : 0
+        const hint = isElevationCanvas
+          ? 'Hover highlights target · click or tiny drag removes one item · drag a box to clear every annotation that intersects (priority: dimension segment → grid ref → section line → level line → label)'
+          : 'Hover highlights target · click or tiny drag removes one item · drag a box to clear every annotation that intersects (priority: dimension segment → grid ref → section line → label)'
+        if (nd + ng + ns + nl + nlv === 0) {
+          return `Erase — ${hint} · Nothing to erase yet`
         }
-        return 'Erase — click a grid segment that belongs to a dimension run to remove that run · Esc clears all'
+        return [
+          hint,
+          nd ? `${nd} dimension run(s)` : null,
+          ng ? `${ng} grid ref` : null,
+          ns ? `${ns} section cut(s)` : null,
+          nlv ? `${nlv} level line(s)` : null,
+          nl ? `${nl} label(s)` : null,
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      }
+      if (annotationTool === 'textLabel') {
+        const t = annotationLabelDraft.trim()
+        return t
+          ? `Text — click plan to place “${t.length > 36 ? `${t.slice(0, 36)}…` : t}”`
+          : 'Text — enter label text in the toolbar, then click the plan'
+      }
+      if (
+        annotationTool === 'sectionCut' &&
+        measurePreviewNodes &&
+        !(wallLinePreviewKeys?.length)
+      ) {
+        return 'Section — drag to second grid node · straight cut line with markers · Shift+click continues from last node'
       }
       if (wallLinePreviewKeys?.length) {
         const tot = wallLinePreviewKeys.length * delta
         const su = PLAN_SITE_UNIT_SHORT[planSiteDisplayUnit]
-        return `${formatSiteMeasure(tot, planSiteDisplayUnit)} ${su} · ${wallLinePreviewKeys.length} grid Δ — release to add · Esc clears all`
+        if (annotationTool === 'gridLine') {
+          return `Grid line — ${wallLinePreviewKeys.length} segment(s) · ${formatSiteMeasure(tot, planSiteDisplayUnit)} ${su} along path · release to add`
+        }
+        return `${formatSiteMeasure(tot, planSiteDisplayUnit)} ${su} · ${wallLinePreviewKeys.length} grid Δ — release to add dimension · Esc clears dimensions only`
       }
-      if (measureRuns.length > 0) {
+      if (annotationTool === 'measureLine' && measureRuns.length > 0) {
         const last = measureRuns[measureRuns.length - 1]!
         const lastLen = last.edgeKeys.length * delta
         const { primary, sub } = gridRunMeasureCaption(
@@ -3246,9 +3589,18 @@ export function PlanLayoutEditor({
           planSiteDisplayUnit,
         )
         const n = measureRuns.length
-        return `${n} dimension run${n === 1 ? '' : 's'} · Last: ${primary} — ${sub} · Drag to add another · Esc clears all`
+        return `${n} dimension run${n === 1 ? '' : 's'} · Last: ${primary} — ${sub} · Drag to add · Esc clears all dimensions`
       }
-      return 'Line — drag along grid edges like wall Line · Hold Shift while dragging for straight H/V leg · Shift+click continues from last end · Esc clears all'
+      if (annotationTool === 'measureLine') {
+        return 'Measure line — drag along grid edges · Shift while dragging = straight H/V leg · Shift+click from last end · Esc clears all dimensions'
+      }
+      if (annotationTool === 'gridLine') {
+        return 'Grid line — dashed reference along grid edges (no size label) · Shift+drag and Shift+click same as measure line'
+      }
+      if (annotationTool === 'sectionCut') {
+        return 'Section — pick start on a grid edge, drag to end node · straight line with opposing triangles at center'
+      }
+      return 'Annotation tool'
     }
     if (placeMode === 'room') {
       if (roomTool === 'fill') {
@@ -3305,6 +3657,10 @@ export function PlanLayoutEditor({
         parts.push(
           'Drag a box to erase columns on the active layer · tiny drag removes one column under the pointer',
         )
+      } else if (floorTool === 'select') {
+        parts.push(
+          `${selectedColumnKeys.size} column(s) selected · Delete / ⌫ removes · header “Select all” selects every column`,
+        )
       } else {
         parts.push('Use Paint or Erase in the toolbar')
       }
@@ -3323,35 +3679,24 @@ export function PlanLayoutEditor({
       } else if (wallLinePreviewKeys?.length) {
         const tot = wallLinePreviewKeys.length * delta
         const su = PLAN_SITE_UNIT_SHORT[planSiteDisplayUnit]
-        const chainHint = chainLineErasePreview ? 'Shift+drag to erase' : 'Shift+drag to place'
         parts.push(
-          `${formatSiteMeasure(tot, planSiteDisplayUnit)} ${su} · ${wallLinePreviewKeys.length} grid Δ — ${chainHint}`,
+          `${formatSiteMeasure(tot, planSiteDisplayUnit)} ${su} · ${wallLinePreviewKeys.length} segments`,
         )
       } else if (movePreview && (movePreview.di !== 0 || movePreview.dj !== 0)) {
         parts.push(`Move Δ ${movePreview.di},${movePreview.dj} cells`)
       } else if (structureTool === 'select') {
         parts.push(`${selectedEdgeKeys.size} edge(s) selected`)
-      } else if (hoverEdge) {
-        parts.push(`Edge ${formatThickness(hoverLengthIn)}`)
-      } else {
-        parts.push('—')
       }
       if (structureTool === 'paint') {
-        parts.push(
-          'Drag line from click · Shift while dragging = straight H/V leg · Hold Shift = chain preview from last node + length · Shift+drag to commit chain',
-        )
+        parts.push('Drag along the grid to draw')
       } else if (structureTool === 'rect') {
-        parts.push('Drag a box to place a rectangular frame on the grid')
+        parts.push('Drag a box for a wall frame')
       } else if (structureTool === 'erase') {
-        parts.push(
-          'Drag box to erase walls · tiny drag = one edge · Hold Shift = chain erase preview from last node · Shift+drag to commit',
-        )
+        parts.push('Drag to erase walls')
       } else {
-        parts.push(
-          'Drag box to select · Shift adds · Drag selection to move · Del or ⌫ removes selected edges · Esc clears selection',
-        )
+        parts.push('Drag box to select walls')
       }
-      return parts.join(' · ')
+      return parts.filter(Boolean).join(' · ')
     }
     const cellKindLabel = placeMode === 'stairs' ? 'stair' : 'floor'
     const parts: string[] = []
@@ -3389,8 +3734,6 @@ export function PlanLayoutEditor({
   }, [
     placeMode,
     isEdgeLayerMode,
-    hoverEdge,
-    hoverLengthIn,
     hoverCell,
     floorTool,
     structureTool,
@@ -3401,11 +3744,15 @@ export function PlanLayoutEditor({
     selectedEdgeKeys.size,
     selectedCellKeys.size,
     suspendPlanPainting,
-    measureToolActive,
-    measureTool,
+    annotationToolActive,
+    annotationTool,
+    annotationLabelDraft,
     measureRuns,
+    annotationGridRuns,
+    annotationSectionCuts,
+    annotationLabels,
+    elevationLevelLines,
     measurePreviewNodes,
-    chainLineErasePreview,
     planSiteDisplayUnit,
     delta,
     enclosedRooms,
@@ -3414,12 +3761,22 @@ export function PlanLayoutEditor({
     roomTool,
     selectedRoomEdgeKeys.size,
     selectedRoomZoneCellKeys,
+    selectedAnnotationKeys,
+    selectedColumnKeys.size,
+    sketch.elevationGroundPlaneJ,
+    isElevationCanvas,
+    levelLineLabelDraft,
   ])
 
   const canDeleteSelection =
     !suspendPlanPainting &&
-    ((structureTool === 'select' && selectedEdgeKeys.size > 0) ||
+    ((isElevationCanvas &&
+      annotationTool === 'groundLine' &&
+      sketch.elevationGroundPlaneJ != null) ||
+      (annotationToolActive && annotationTool === 'select' && selectedAnnotationKeys.size > 0) ||
+      (structureTool === 'select' && selectedEdgeKeys.size > 0) ||
       (floorTool === 'select' && selectedCellKeys.size > 0) ||
+      (placeMode === 'column' && floorTool === 'select' && selectedColumnKeys.size > 0) ||
       (placeMode === 'room' &&
         roomTool === 'select' &&
         (selectedRoomEdgeKeys.size > 0 || !!selectedRoomZoneCellKeys?.length)))
@@ -3483,7 +3840,7 @@ export function PlanLayoutEditor({
           disabled={!canDeleteSelection}
           onClick={() => deleteSelectedItems()}
           className="font-mono text-[9px] px-2 py-0.5 border border-border hover:bg-muted shrink-0 disabled:opacity-40 disabled:pointer-events-none"
-          title="Remove selection: walls/MEP edges, floor cells, room boundary segments, or selected room zone name (Delete or Backspace)"
+          title="Remove selection or elevation ground line (Delete or Backspace)"
         >
           Delete
         </button>
@@ -3523,8 +3880,10 @@ export function PlanLayoutEditor({
                 height={ch}
                 viewBox={`0 0 ${cw} ${ch}`}
                 className={`block touch-none select-none overflow-visible${
-                  measureToolActive
-                    ? measureTool === 'erase'
+                  annotationToolActive
+                    ? annotationTool === 'erase' ||
+                        annotationTool === 'textLabel' ||
+                        annotationTool === 'select'
                       ? ' cursor-pointer'
                       : ' cursor-crosshair'
                     : placeMode === 'room' && roomTool !== 'autoFill'
@@ -3574,6 +3933,7 @@ export function PlanLayoutEditor({
                         width={w}
                         height={w}
                         fill={planCellFill(c, planColorCatalog)}
+                        fillOpacity={planCellColumnOpacity(c, planVisualProfile ?? undefined, mepById)}
                         stroke="rgba(0,0,0,0.12)"
                         strokeWidth={0.45}
                         pointerEvents="none"
@@ -3594,12 +3954,36 @@ export function PlanLayoutEditor({
                       width={sPx}
                       height={sPx}
                       fill={planPaintSwatchColor('arch', col.systemId, 'column', planColorCatalog)}
+                      fillOpacity={planCellColumnOpacity(col, planVisualProfile ?? undefined, mepById)}
                       stroke="rgba(0,0,0,0.22)"
                       strokeWidth={0.55}
                       pointerEvents="none"
                     />
                   )
                 })}
+
+                {Array.from(selectedColumnKeys)
+                  .map((pk) => displayColumnsSorted.find((c) => placedColumnKey(c) === pk))
+                  .filter((col): col is PlacedPlanColumn => col != null)
+                  .map((col) => {
+                    const half = col.sizeIn / 2
+                    const { x, y } = planInchesToCanvasPx(d, col.cxIn - half, col.cyIn - half)
+                    const sPx = col.sizeIn * d.planScale
+                    return (
+                      <rect
+                        key={`sel-col-${placedColumnKey(col)}`}
+                        x={x}
+                        y={y}
+                        width={sPx}
+                        height={sPx}
+                        fill="none"
+                        stroke="#1976d2"
+                        strokeWidth={2.5}
+                        strokeDasharray="6 4"
+                        pointerEvents="none"
+                      />
+                    )
+                  })}
 
                 <defs>
                   <pattern
@@ -3645,6 +4029,62 @@ export function PlanLayoutEditor({
                 <rect width={cw} height={ch} fill={`url(#${patGridV})`} pointerEvents="none" />
                 <rect width={cw} height={ch} fill={`url(#${patGridDots})`} pointerEvents="none" />
 
+                {isElevationCanvas &&
+                  sketch.elevationGroundPlaneJ != null &&
+                  sketch.elevationGroundPlaneJ >= 0 &&
+                  sketch.elevationGroundPlaneJ <= siteNy && (
+                    <line
+                      x1={GRID_TRIM}
+                      y1={sketch.elevationGroundPlaneJ * cellPx}
+                      x2={cw - GRID_TRIM}
+                      y2={sketch.elevationGroundPlaneJ * cellPx}
+                      stroke="#2d6a4f"
+                      strokeWidth={Math.max(1.25, cellPx * 0.04)}
+                      strokeDasharray="6 4"
+                      strokeLinecap="round"
+                      pointerEvents="none"
+                      opacity={0.92}
+                    />
+                  )}
+
+                {isElevationCanvas &&
+                  elevationLevelLines.map((lv) => {
+                  if (lv.j < 0 || lv.j > siteNy) return null
+                  const y = lv.j * cellPx
+                  const lw = Math.max(1.1, cellPx * 0.035)
+                  const lab = lv.label?.trim()
+                  return (
+                    <g key={lv.id} pointerEvents="none">
+                      <line
+                        x1={GRID_TRIM}
+                        y1={y}
+                        x2={cw - GRID_TRIM}
+                        y2={y}
+                        stroke="#2563eb"
+                        strokeWidth={lw}
+                        strokeDasharray="5 4"
+                        strokeLinecap="round"
+                        opacity={0.9}
+                      />
+                      {lab ? (
+                        <text
+                          x={GRID_TRIM + 4}
+                          y={y}
+                          textAnchor="start"
+                          dominantBaseline="middle"
+                          fill="#1e3a8a"
+                          stroke="#fff"
+                          strokeWidth={2.5}
+                          paintOrder="stroke fill"
+                          style={{ fontFamily: "'Courier New', Courier, monospace", fontSize: 11 }}
+                        >
+                          {lab}
+                        </text>
+                      ) : null}
+                    </g>
+                  )
+                  })}
+
                 {planLinesPaintOrder.map((item) => {
                   if (item.k === 'placed') {
                     const e = item.e
@@ -3659,6 +4099,7 @@ export function PlanLayoutEditor({
                         x2={x2}
                         y2={y2}
                         stroke={planEdgeStroke(e, planColorCatalog)}
+                        strokeOpacity={planPlacedEdgeOpacity(e, planVisualProfile ?? undefined, mepById)}
                         strokeWidth={sw}
                         strokeLinecap="square"
                         strokeDasharray={dash}
@@ -3888,36 +4329,89 @@ export function PlanLayoutEditor({
 
                 {wallLinePreviewKeys && wallLinePreviewKeys.length > 0 && (
                   <g pointerEvents="none">
-                    {wallLinePreviewKeys.map((ks) => {
-                      const parsed = parseEdgeKeyString(ks)
-                      if (!parsed) return null
-                      const { x1, y1, x2, y2 } = edgeEndpointsCanvasPx(d, parsed, delta)
+                    {(() => {
                       const pvStroke =
-                        placeMode === 'measure'
+                        placeMode === 'annotate' && annotationTool === 'measureLine'
                           ? '#1d4ed8'
-                          : placeMode === 'room'
-                            ? chainLineErasePreview
-                              ? '#e65100'
-                              : '#7c3aed'
-                            : chainLineErasePreview
-                              ? '#e65100'
-                              : '#c62828'
-                      return (
-                        <line
-                          key={`pv-${ks}`}
-                          x1={x1}
-                          y1={y1}
-                          x2={x2}
-                          y2={y2}
+                          : placeMode === 'annotate' && annotationTool === 'gridLine'
+                            ? '#64748b'
+                            : placeMode === 'room'
+                              ? chainLineErasePreview
+                                ? '#e65100'
+                                : '#7c3aed'
+                              : chainLineErasePreview
+                                ? '#e65100'
+                                : '#c62828'
+                      const polyPts = wallPreviewPolylinePointsCanvas(wallLinePreviewKeys, d, delta)
+                      const main = polyPts ? (
+                        <polyline
+                          points={polyPts}
+                          fill="none"
                           stroke={pvStroke}
                           strokeWidth={2.5}
                           strokeLinecap="square"
+                          strokeLinejoin="miter"
                           strokeDasharray="5 4"
                           opacity={0.88}
                         />
+                      ) : (
+                        wallLinePreviewKeys.map((ks) => {
+                          const parsed = parseEdgeKeyString(ks)
+                          if (!parsed) return null
+                          const { x1, y1, x2, y2 } = edgeEndpointsCanvasPx(d, parsed, delta)
+                          return (
+                            <line
+                              key={`pv-${ks}`}
+                              x1={x1}
+                              y1={y1}
+                              x2={x2}
+                              y2={y2}
+                              stroke={pvStroke}
+                              strokeWidth={2.5}
+                              strokeLinecap="square"
+                              strokeDasharray="5 4"
+                              opacity={0.88}
+                            />
+                          )
+                        })
                       )
-                    })}
+                      const rubber =
+                        wallLinePreviewRubberPlanIn &&
+                        (() => {
+                          const p0 = planInchesToCanvasPx(
+                            d,
+                            wallLinePreviewRubberPlanIn.x0,
+                            wallLinePreviewRubberPlanIn.y0,
+                          )
+                          const p1 = planInchesToCanvasPx(
+                            d,
+                            wallLinePreviewRubberPlanIn.x1,
+                            wallLinePreviewRubberPlanIn.y1,
+                          )
+                          return (
+                            <line
+                              x1={p0.x}
+                              y1={p0.y}
+                              x2={p1.x}
+                              y2={p1.y}
+                              stroke={pvStroke}
+                              strokeWidth={2}
+                              strokeLinecap="round"
+                              strokeDasharray="3 4"
+                              opacity={0.58}
+                            />
+                          )
+                        })()
+                      return (
+                        <>
+                          {main}
+                          {rubber}
+                        </>
+                      )
+                    })()}
                     {measurePreviewNodes &&
+                      placeMode === 'annotate' &&
+                      annotationTool === 'measureLine' &&
                       (() => {
                         const pos = previewPathCentroidCanvas(wallLinePreviewKeys, d, delta)
                         if (!pos) return null
@@ -3928,16 +4422,7 @@ export function PlanLayoutEditor({
                           wallLinePreviewKeys.length,
                           planSiteDisplayUnit,
                         ).primary
-                        const fill =
-                          placeMode === 'measure'
-                            ? '#1d4ed8'
-                            : placeMode === 'room'
-                              ? chainLineErasePreview
-                                ? '#e65100'
-                                : '#5b21b6'
-                              : chainLineErasePreview
-                                ? '#e65100'
-                                : '#0f172a'
+                        const fill = '#1d4ed8'
                         const labelLiftPx = 12
                         return (
                           <text
@@ -3957,6 +4442,23 @@ export function PlanLayoutEditor({
                       })()}
                   </g>
                 )}
+
+                {measurePreviewNodes &&
+                  placeMode === 'annotate' &&
+                  annotationTool === 'sectionCut' &&
+                  !(wallLinePreviewKeys?.length) &&
+                  (measurePreviewNodes.start.i !== measurePreviewNodes.end.i ||
+                    measurePreviewNodes.start.j !== measurePreviewNodes.end.j) && (
+                    <SectionCutGraphic
+                      d={d}
+                      delta={delta}
+                      cut={{
+                        id: 'preview-sc',
+                        startNode: measurePreviewNodes.start,
+                        endNode: measurePreviewNodes.end,
+                      }}
+                    />
+                  )}
 
                 {eraseMarqueeSvg && (eraseMarqueeSvg.w > 0 || eraseMarqueeSvg.h > 0) && (
                   <rect
@@ -4054,10 +4556,10 @@ export function PlanLayoutEditor({
 
                 {placeMode === 'room' &&
                   roomTool === 'select' &&
-                  selectedRoomZoneCellKeys &&
-                  selectedRoomZoneCellKeys.length > 0 && (
+                  selectedRoomZoneOutlineSegs &&
+                  selectedRoomZoneOutlineSegs.length > 0 && (
                     <g pointerEvents="none" aria-hidden>
-                      {planRoomZoneOutlineSegments(selectedRoomZoneCellKeys, cellPx).map((seg) => (
+                      {selectedRoomZoneOutlineSegs.map((seg) => (
                         <line
                           key={`sel-room-zone-${seg.x1}-${seg.y1}-${seg.x2}-${seg.y2}`}
                           x1={seg.x1}
@@ -4185,6 +4687,32 @@ export function PlanLayoutEditor({
                   />
                 )}
 
+                {annotationGridRuns.map((run) => (
+                  <GridReferencePathOverlay key={run.id} d={d} delta={delta} edgeKeys={run.edgeKeys} />
+                ))}
+                {annotationSectionCuts.map((cut) => (
+                  <SectionCutGraphic key={cut.id} d={d} delta={delta} cut={cut} />
+                ))}
+                {annotationLabels.map((L) => {
+                  const { x, y } = planInchesToCanvasPx(d, L.xIn, L.yIn)
+                  return (
+                    <text
+                      key={L.id}
+                      x={x}
+                      y={y}
+                      textAnchor="start"
+                      dominantBaseline="hanging"
+                      fill="#0f172a"
+                      stroke="#fff"
+                      strokeWidth={2}
+                      paintOrder="stroke fill"
+                      style={{ fontFamily: "'Courier New', Courier, monospace", fontSize: 11 }}
+                    >
+                      {L.text}
+                    </text>
+                  )
+                })}
+
                 {measureRuns.map((run) => (
                   <GridPathDimensionOverlay
                     key={run.id}
@@ -4213,6 +4741,296 @@ export function PlanLayoutEditor({
                     }
                   />
                 ))}
+
+                {annotationTool === 'erase' &&
+                  eraseMarqueeAnnotationPreviewKeys &&
+                  eraseMarqueeAnnotationPreviewKeys.length > 0 && (
+                    <AnnotationKeyHighlightOverlay
+                      keys={eraseMarqueeAnnotationPreviewKeys}
+                      stroke="#dc2626"
+                      strokeOpacity={0.5}
+                      reactKeyPrefix="ann-ers-pre"
+                      d={d}
+                      delta={delta}
+                      measureRuns={measureRuns}
+                      annotationGridRuns={annotationGridRuns}
+                      annotationSectionCuts={annotationSectionCuts}
+                      annotationLabels={annotationLabels}
+                      elevationLevelLines={elevationLevelLines}
+                      canvasW={cw}
+                      cellPx={cellPx}
+                    />
+                  )}
+
+                {annotationTool === 'erase' && hoverAnnotationEraseKey && (
+                  <AnnotationKeyHighlightOverlay
+                    keys={[hoverAnnotationEraseKey]}
+                    stroke="#b91c1c"
+                    strokeOpacity={0.95}
+                    reactKeyPrefix="ann-ers-hov"
+                    d={d}
+                    delta={delta}
+                    measureRuns={measureRuns}
+                    annotationGridRuns={annotationGridRuns}
+                    annotationSectionCuts={annotationSectionCuts}
+                    annotationLabels={annotationLabels}
+                    elevationLevelLines={elevationLevelLines}
+                    canvasW={cw}
+                    cellPx={cellPx}
+                  />
+                )}
+
+                {annotationTool === 'select' &&
+                  hoverAnnotationSelectKey &&
+                  !selectedAnnotationKeys.has(hoverAnnotationSelectKey) && (
+                  <g pointerEvents="none" aria-hidden>
+                    {Array.from([hoverAnnotationSelectKey]).flatMap((key) => {
+                      const hi = '#ea580c'
+                      const sw = Math.max(3.2, 2.2 * d.planScale * 0.12)
+                      if (key.startsWith('dim:')) {
+                        const id = key.slice(4)
+                        const run = measureRuns.find((r) => r.id === id)
+                        if (!run) return []
+                        return run.edgeKeys.flatMap((ks) => {
+                          const parsed = parseEdgeKeyString(ks)
+                          if (!parsed) return []
+                          const { x1, y1, x2, y2 } = edgeEndpointsCanvasPx(d, parsed, delta)
+                          return [
+                            <line
+                              key={`ann-hov-dim-${id}-${ks}`}
+                              x1={x1}
+                              y1={y1}
+                              x2={x2}
+                              y2={y2}
+                              stroke={hi}
+                              strokeWidth={sw}
+                              strokeLinecap="square"
+                              opacity={0.92}
+                            />,
+                          ]
+                        })
+                      }
+                      if (key.startsWith('grid:')) {
+                        const id = key.slice(5)
+                        const run = annotationGridRuns.find((r) => r.id === id)
+                        if (!run) return []
+                        return run.edgeKeys.flatMap((ks) => {
+                          const parsed = parseEdgeKeyString(ks)
+                          if (!parsed) return []
+                          const { x1, y1, x2, y2 } = edgeEndpointsCanvasPx(d, parsed, delta)
+                          return [
+                            <line
+                              key={`ann-hov-grid-${id}-${ks}`}
+                              x1={x1}
+                              y1={y1}
+                              x2={x2}
+                              y2={y2}
+                              stroke={hi}
+                              strokeWidth={sw * 0.9}
+                              strokeLinecap="square"
+                              strokeDasharray="5 4"
+                              opacity={0.92}
+                            />,
+                          ]
+                        })
+                      }
+                      if (key.startsWith('sec:')) {
+                        const id = key.slice(4)
+                        const cut = annotationSectionCuts.find((c) => c.id === id)
+                        if (!cut) return []
+                        const x1 = cut.startNode.i * delta
+                        const y1 = cut.startNode.j * delta
+                        const x2 = cut.endNode.i * delta
+                        const y2 = cut.endNode.j * delta
+                        const p1 = planInchesToCanvasPx(d, x1, y1)
+                        const p2 = planInchesToCanvasPx(d, x2, y2)
+                        return [
+                          <line
+                            key={`ann-hov-sec-${id}-ln`}
+                            x1={p1.x}
+                            y1={p1.y}
+                            x2={p2.x}
+                            y2={p2.y}
+                            stroke={hi}
+                            strokeWidth={sw + 1.5}
+                            strokeLinecap="square"
+                            strokeDasharray="10 5"
+                            opacity={0.88}
+                          />,
+                        ]
+                      }
+                      if (key.startsWith('lvl:')) {
+                        const id = key.slice(4)
+                        const L = elevationLevelLines.find((l) => l.id === id)
+                        if (!L) return []
+                        const yy = L.j * cellPx
+                        return [
+                          <line
+                            key={`ann-hov-lvl-${id}`}
+                            x1={GRID_TRIM}
+                            y1={yy}
+                            x2={cw - GRID_TRIM}
+                            y2={yy}
+                            stroke={hi}
+                            strokeWidth={sw * 1.1}
+                            strokeLinecap="round"
+                            strokeDasharray="4 3"
+                            opacity={0.92}
+                          />,
+                        ]
+                      }
+                      if (key.startsWith('lbl:')) {
+                        const id = key.slice(4)
+                        const L = annotationLabels.find((l) => l.id === id)
+                        if (!L) return []
+                        const { x, y } = planInchesToCanvasPx(d, L.xIn, L.yIn)
+                        const tw = Math.max(28, L.text.length * 6.8)
+                        const th = 14
+                        return [
+                          <rect
+                            key={`ann-hov-lbl-${id}`}
+                            x={x - 3}
+                            y={y - 2}
+                            width={tw}
+                            height={th}
+                            fill="none"
+                            stroke={hi}
+                            strokeWidth={2}
+                            strokeDasharray="5 3"
+                            rx={2}
+                            opacity={0.95}
+                          />,
+                        ]
+                      }
+                      return []
+                    })}
+                  </g>
+                )}
+
+                {annotationTool === 'select' && selectedAnnotationKeys.size > 0 && (
+                  <g pointerEvents="none" aria-hidden>
+                    {Array.from(selectedAnnotationKeys).flatMap((key) => {
+                      const hi = '#1976d2'
+                      const sw = Math.max(3.2, 2.2 * d.planScale * 0.12)
+                      if (key.startsWith('dim:')) {
+                        const id = key.slice(4)
+                        const run = measureRuns.find((r) => r.id === id)
+                        if (!run) return []
+                        return run.edgeKeys.flatMap((ks) => {
+                          const parsed = parseEdgeKeyString(ks)
+                          if (!parsed) return []
+                          const { x1, y1, x2, y2 } = edgeEndpointsCanvasPx(d, parsed, delta)
+                          return [
+                            <line
+                              key={`ann-sel-dim-${id}-${ks}`}
+                              x1={x1}
+                              y1={y1}
+                              x2={x2}
+                              y2={y2}
+                              stroke={hi}
+                              strokeWidth={sw}
+                              strokeLinecap="square"
+                              opacity={0.92}
+                            />,
+                          ]
+                        })
+                      }
+                      if (key.startsWith('grid:')) {
+                        const id = key.slice(5)
+                        const run = annotationGridRuns.find((r) => r.id === id)
+                        if (!run) return []
+                        return run.edgeKeys.flatMap((ks) => {
+                          const parsed = parseEdgeKeyString(ks)
+                          if (!parsed) return []
+                          const { x1, y1, x2, y2 } = edgeEndpointsCanvasPx(d, parsed, delta)
+                          return [
+                            <line
+                              key={`ann-sel-grid-${id}-${ks}`}
+                              x1={x1}
+                              y1={y1}
+                              x2={x2}
+                              y2={y2}
+                              stroke={hi}
+                              strokeWidth={sw * 0.9}
+                              strokeLinecap="square"
+                              strokeDasharray="5 4"
+                              opacity={0.92}
+                            />,
+                          ]
+                        })
+                      }
+                      if (key.startsWith('sec:')) {
+                        const id = key.slice(4)
+                        const cut = annotationSectionCuts.find((c) => c.id === id)
+                        if (!cut) return []
+                        const x1 = cut.startNode.i * delta
+                        const y1 = cut.startNode.j * delta
+                        const x2 = cut.endNode.i * delta
+                        const y2 = cut.endNode.j * delta
+                        const p1 = planInchesToCanvasPx(d, x1, y1)
+                        const p2 = planInchesToCanvasPx(d, x2, y2)
+                        return [
+                          <line
+                            key={`ann-sel-sec-${id}-ln`}
+                            x1={p1.x}
+                            y1={p1.y}
+                            x2={p2.x}
+                            y2={p2.y}
+                            stroke={hi}
+                            strokeWidth={sw + 1.5}
+                            strokeLinecap="square"
+                            strokeDasharray="10 5"
+                            opacity={0.88}
+                          />,
+                        ]
+                      }
+                      if (key.startsWith('lvl:')) {
+                        const id = key.slice(4)
+                        const L = elevationLevelLines.find((l) => l.id === id)
+                        if (!L) return []
+                        const yy = L.j * cellPx
+                        return [
+                          <line
+                            key={`ann-sel-lvl-${id}`}
+                            x1={GRID_TRIM}
+                            y1={yy}
+                            x2={cw - GRID_TRIM}
+                            y2={yy}
+                            stroke={hi}
+                            strokeWidth={sw * 1.1}
+                            strokeLinecap="round"
+                            strokeDasharray="4 3"
+                            opacity={0.92}
+                          />,
+                        ]
+                      }
+                      if (key.startsWith('lbl:')) {
+                        const id = key.slice(4)
+                        const L = annotationLabels.find((l) => l.id === id)
+                        if (!L) return []
+                        const { x, y } = planInchesToCanvasPx(d, L.xIn, L.yIn)
+                        const tw = Math.max(28, L.text.length * 6.8)
+                        const th = 14
+                        return [
+                          <rect
+                            key={`ann-sel-lbl-${id}`}
+                            x={x - 3}
+                            y={y - 2}
+                            width={tw}
+                            height={th}
+                            fill="none"
+                            stroke={hi}
+                            strokeWidth={2}
+                            strokeDasharray="5 3"
+                            rx={2}
+                            opacity={0.95}
+                          />,
+                        ]
+                      }
+                      return []
+                    })}
+                  </g>
+                )}
               </svg>
             </div>
           </div>

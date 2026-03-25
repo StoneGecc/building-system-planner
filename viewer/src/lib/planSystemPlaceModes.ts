@@ -35,7 +35,7 @@ export function inferDefaultPlanPlaceModeForArchSystem(s: SystemData): PlanPlace
 
 /** Whether this architectural system appears in the picker for the given plan tool (Walls, Roof, …). */
 export function archSystemMatchesPlanPlaceMode(s: SystemData, mode: PlanPlaceMode): boolean {
-  if (mode === 'measure' || mode === 'mep' || mode === 'room') return false
+  if (mode === 'annotate' || mode === 'mep' || mode === 'room') return false
   const tags = s.planDrawLayers
   const st = s.systemType ?? ''
   const stLower = st.toLowerCase()

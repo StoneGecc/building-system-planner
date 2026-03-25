@@ -1,6 +1,11 @@
 import type { PlacedFloorCell, PlacedGridEdge } from '../types/planLayout'
 import type { SystemData } from '../types/system'
 import type { MepItem } from '../types/mep'
+import type { PlanPlaceMode } from '../types/planPlaceMode'
+import type { Floor1SheetId, Floor1VisualMode } from '../data/floor1Sheets'
+import { mepDisciplineMatches } from '../data/floor1Sheets'
+
+export type { PlanPlaceMode } from '../types/planPlaceMode'
 
 /** Golden-angle step (degrees) so consecutive catalog systems land far apart on the hue wheel. */
 const GOLDEN_HUE_STEP = 137.50776405003785
@@ -103,18 +108,6 @@ export function planCellFill(c: Pick<PlacedFloorCell, 'source' | 'systemId' | 'c
   return planFloorFillHsla(c.source, c.systemId, 0.48, catalog)
 }
 
-export type PlanPlaceMode =
-  | 'structure'
-  | 'floor'
-  | 'column'
-  | 'window'
-  | 'door'
-  | 'roof'
-  | 'stairs'
-  | 'mep'
-  | 'measure'
-  | 'room'
-
 /** Swatch for UI pickers: matches what you see when painting walls vs floor vs MEP runs. */
 export function planPaintSwatchColor(
   source: 'arch' | 'mep',
@@ -122,7 +115,7 @@ export function planPaintSwatchColor(
   placeMode: PlanPlaceMode,
   catalog: PlanColorCatalog,
 ): string {
-  if (placeMode === 'measure') {
+  if (placeMode === 'annotate') {
     return '#64748b'
   }
   if (placeMode === 'room') {
@@ -150,4 +143,50 @@ export function planPaintSwatchColor(
     return planCellFill({ source: 'arch', systemId, cellKind: 'stairs' }, catalog)
   }
   return planEdgeStroke({ source: 'arch', systemId, kind: 'wall' }, catalog)
+}
+
+/** Per–Floor-1-sheet emphasis for placed plan edges (stroke opacity multiplier). */
+export type PlanVisualProfile = {
+  mode: Floor1VisualMode
+  /** When mode is `trade_mep`, which discipline filter sheet to highlight. */
+  tradeMepSheetId: Floor1SheetId | null
+}
+
+const DIM_ARCH = 0.38
+const DIM_MEP_OFF = 0.28
+const DIM_MEP_INTERIOR = 0.22
+
+export function planPlacedEdgeOpacity(
+  e: Pick<PlacedGridEdge, 'source' | 'systemId' | 'kind'>,
+  profile: PlanVisualProfile | undefined,
+  mepById: ReadonlyMap<string, MepItem>,
+): number {
+  if (!profile || profile.mode === 'layout') return 1
+  const src = e.source ?? 'arch'
+  if (profile.mode === 'interior') {
+    return src === 'mep' ? DIM_MEP_INTERIOR : 1
+  }
+  // trade_mep
+  if (src === 'arch') return DIM_ARCH
+  const sheet = profile.tradeMepSheetId
+  if (!sheet) return DIM_MEP_OFF
+  const disc = mepById.get(e.systemId)?.discipline ?? ''
+  return mepDisciplineMatches(sheet, disc) ? 1 : DIM_MEP_OFF
+}
+
+export function planCellColumnOpacity(
+  c: Pick<PlacedFloorCell, 'source' | 'systemId'>,
+  profile: PlanVisualProfile | undefined,
+  mepById: ReadonlyMap<string, MepItem>,
+): number {
+  if (!profile || profile.mode === 'layout') return 1
+  const src = c.source ?? 'arch'
+  if (profile.mode === 'interior') {
+    return src === 'mep' ? DIM_MEP_INTERIOR : 1
+  }
+  if (src === 'arch') return DIM_ARCH
+  const sheet = profile.tradeMepSheetId
+  if (!sheet) return DIM_MEP_OFF
+  const disc = mepById.get(c.systemId)?.discipline ?? ''
+  return mepDisciplineMatches(sheet, disc) ? 1 : DIM_MEP_OFF
 }

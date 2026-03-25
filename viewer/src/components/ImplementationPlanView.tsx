@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SystemData, BuildingDimensions } from '../types/system'
 import type { MepItem } from '../types/mep'
 import type { PlanLayoutSketch, PlanSketchCommitOptions } from '../types/planLayout'
@@ -13,13 +13,13 @@ import {
   type ActiveCatalog,
   type FloorTool,
   type LayoutTool,
-  type MeasureTool,
+  type AnnotationTool,
   type RoomTool,
 } from './PlanLayoutEditor'
 import { PlanSketchLayersBar } from './PlanSketchLayersBar'
 import { parseMepCsv } from '../lib/mepCsvParser'
 import { downloadSketchJson, readSketchFromFile } from '../lib/planLayoutStorage'
-import { applySequentialAutoRoomNames } from '../lib/planRooms'
+import { applySequentialAutoRoomNames, roomNamesEqualIgnoreCase } from '../lib/planRooms'
 import {
   type PlanSiteDisplayUnit,
   PLAN_SITE_UNIT_LABELS,
@@ -36,21 +36,28 @@ import {
 } from '../lib/planDisplayUnits'
 import { formatThickness } from '../lib/csvParser'
 import { cn } from '../lib/utils'
-import {
-  buildPlanColorCatalog,
-  planPaintSwatchColor,
-  type PlanColorCatalog,
-  type PlanPlaceMode,
-} from '../lib/planLayerColors'
+import { buildPlanColorCatalog, type PlanPlaceMode } from '../lib/planLayerColors'
 import {
   archSystemMatchesPlanPlaceMode,
   inferDefaultPlanPlaceModeForArchSystem,
 } from '../lib/planSystemPlaceModes'
 import {
+  PLAN_ANNOTATIONS_LAYER_ID,
   PLAN_ROOMS_LAYER_ID,
   PLAN_ROOMS_LAYER_SOURCE,
   PLAN_ROOMS_LAYER_SYSTEM_ID,
 } from '../lib/planRoomsLayerIdentity'
+import { FLOOR1_SHEETS, filterMepItemsForSheet } from '../data/floor1Sheets'
+import { elevationCanvasInches } from '../data/elevationSheets'
+import { ToolbarGroup } from './ToolbarGroup'
+import type { PaintSystemOption } from './PlanSystemPicker'
+import {
+  ImplementationPlanBottomToolbar,
+  ImplementationPlanFloatingToolbar,
+} from './implementationPlan/ImplementationPlanEditorToolbars'
+import type { ImplementationPlanViewContext } from '@/components/implementationPlan/viewContext'
+
+export type { ImplementationPlanViewContext }
 
 interface ImplementationPlanViewProps {
   buildingDimensions: BuildingDimensions
@@ -61,183 +68,19 @@ interface ImplementationPlanViewProps {
   canUndo?: boolean
   onRedo?: () => void
   canRedo?: boolean
+  /** Floor 1 sheet vs elevation (N/E/S/W); tools and canvas follow this context. */
+  planViewContext: ImplementationPlanViewContext
+  /** Resolved building height in plan inches (from floor-1 sketch or default). */
+  buildingHeightIn: number
+  onBuildingHeightInChange: (inches: number) => void
+  /** Floor 1 layout sketch — source of truth for grid spacing (elevations use the same Δ). */
+  layoutSketch: PlanLayoutSketch
+  onLayoutSketchChange: (next: PlanLayoutSketch, opts?: PlanSketchCommitOptions) => void
   className?: string
 }
 
 const GRID_PRESETS_IN = [4, 6, 12, 24]
 
-function ToolbarGroup({
-  title,
-  children,
-  className,
-  bodyClassName,
-}: {
-  title: string
-  children: ReactNode
-  className?: string
-  /** Default: horizontal wrap. Use e.g. flex-col w-full min-w-0 for full-width controls. */
-  bodyClassName?: string
-}) {
-  return (
-    <div
-      className={cn(
-        'flex flex-col gap-1 rounded-md border border-border/70 bg-muted/20 px-2 py-1.5 min-w-0',
-        className,
-      )}
-    >
-      <span className="font-mono text-[8px] uppercase tracking-wider text-muted-foreground leading-none select-none">
-        {title}
-      </span>
-      <div className={cn('flex flex-wrap items-center gap-1.5 gap-y-1', bodyClassName)}>{children}</div>
-    </div>
-  )
-}
-
-function cloneSketch(s: PlanLayoutSketch): PlanLayoutSketch {
-  return {
-    ...s,
-    edges: s.edges.map((e) => ({ ...e })),
-    cells: (s.cells ?? []).map((c) => ({ ...c })),
-    measureRuns: (s.measureRuns ?? []).map((r) => ({
-      ...r,
-      startNode: { ...r.startNode },
-      endNode: { ...r.endNode },
-      edgeKeys: [...r.edgeKeys],
-    })),
-    traceOverlay: s.traceOverlay ? { ...s.traceOverlay } : undefined,
-    roomBoundaryEdges: s.roomBoundaryEdges?.map((e) => ({ ...e })),
-    roomByCell: s.roomByCell ? { ...s.roomByCell } : undefined,
-  }
-}
-
-type PaintSystemOption = {
-  value: string
-  /** Left column in the picker (id — name). */
-  title: string
-  /** Right column, e.g. formatted thickness (right-aligned in the dropdown). */
-  detail?: string
-  catalog: ActiveCatalog
-  id: string
-}
-
-function PlanSystemPicker({
-  options,
-  value,
-  placeMode,
-  planColorCatalog,
-  onChange,
-  disabled,
-}: {
-  options: PaintSystemOption[]
-  value: string
-  placeMode: PlanPlaceMode
-  planColorCatalog: PlanColorCatalog
-  onChange: (raw: string) => void
-  disabled?: boolean
-}) {
-  const [open, setOpen] = useState(false)
-  const wrapRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    setOpen(false)
-  }, [placeMode])
-
-  useEffect(() => {
-    if (!open) return
-    const onDoc = (e: PointerEvent) => {
-      if (wrapRef.current?.contains(e.target as Node)) return
-      setOpen(false)
-    }
-    document.addEventListener('pointerdown', onDoc, true)
-    return () => document.removeEventListener('pointerdown', onDoc, true)
-  }, [open])
-
-  const effectiveValue =
-    options.length === 0 ? '' : options.some((o) => o.value === value) ? value : options[0]!.value
-
-  const current = options.find((o) => o.value === effectiveValue)
-
-  const swatch = (o: PaintSystemOption) => planPaintSwatchColor(o.catalog, o.id, placeMode, planColorCatalog)
-
-  const optionAriaLabel = (o: PaintSystemOption) =>
-    o.detail ? `${o.title}, ${o.detail}` : o.title
-
-  if (disabled || options.length === 0) {
-    return (
-      <button
-        type="button"
-        disabled
-        className="w-full min-w-0 flex items-center gap-2 border border-border px-1.5 py-1 font-mono text-[9px] bg-muted/30 text-muted-foreground rounded-sm text-left"
-      >
-        <span className="h-2.5 w-2.5 rounded-sm border border-border shrink-0 bg-muted" />
-        No systems
-      </button>
-    )
-  }
-
-  return (
-    <div ref={wrapRef} className="relative w-full min-w-0">
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        aria-label={current ? optionAriaLabel(current) : undefined}
-        onClick={() => setOpen((x) => !x)}
-        className="w-full min-w-0 flex items-center gap-2 border border-border px-1.5 py-1 font-mono text-[9px] bg-white hover:bg-muted/40 rounded-sm text-left"
-      >
-        <span
-          className="h-2.5 w-2.5 rounded-sm border border-black/25 shrink-0"
-          style={{ backgroundColor: swatch(current!) }}
-          aria-hidden
-        />
-        <span className="flex min-w-0 flex-1 items-center justify-between gap-2">
-          <span className="truncate min-w-0">{current?.title}</span>
-          {current?.detail ? (
-            <span className="shrink-0 text-right tabular-nums text-muted-foreground">{current.detail}</span>
-          ) : null}
-        </span>
-        <span className="text-muted-foreground shrink-0 text-[8px] leading-none pt-px">{open ? '▲' : '▼'}</span>
-      </button>
-      {open && (
-        <ul
-          role="listbox"
-          className="absolute left-0 right-0 top-full z-50 mt-1 max-h-56 overflow-auto rounded-sm border border-border bg-white py-0.5 shadow-md"
-        >
-          {options.map((o) => (
-            <li key={o.value} role="none">
-              <button
-                type="button"
-                role="option"
-                aria-selected={o.value === effectiveValue}
-                aria-label={optionAriaLabel(o)}
-                className={cn(
-                  'flex w-full min-w-0 items-center gap-2 px-2 py-1.5 text-left font-mono text-[9px] hover:bg-zinc-100',
-                  o.value === effectiveValue && 'bg-zinc-100',
-                )}
-                onClick={() => {
-                  onChange(o.value)
-                  setOpen(false)
-                }}
-              >
-                <span
-                  className="h-2.5 w-2.5 rounded-sm border border-black/25 shrink-0"
-                  style={{ backgroundColor: swatch(o) }}
-                  aria-hidden
-                />
-                <span className="flex min-w-0 flex-1 items-center justify-between gap-3">
-                  <span className="truncate min-w-0">{o.title}</span>
-                  {o.detail ? (
-                    <span className="shrink-0 text-right tabular-nums text-muted-foreground">{o.detail}</span>
-                  ) : null}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  )
-}
 
 export function ImplementationPlanView({
   buildingDimensions,
@@ -248,11 +91,80 @@ export function ImplementationPlanView({
   canUndo,
   onRedo,
   canRedo,
+  planViewContext,
+  buildingHeightIn,
+  onBuildingHeightInChange,
+  layoutSketch,
+  onLayoutSketchChange,
   className,
 }: ImplementationPlanViewProps) {
   const [mepItems, setMepItems] = useState<MepItem[]>([])
   const [mepFileName, setMepFileName] = useState<string | null>(null)
   const [mepError, setMepError] = useState<string | null>(null)
+  const viewContextKeyRef = useRef<string | null>(null)
+
+  const floor1Sheet = useMemo(
+    () =>
+      planViewContext.kind === 'floor1' ? planViewContext.sheet : FLOOR1_SHEETS[0]!,
+    [planViewContext],
+  )
+
+  /** Elevation pages draw with the layout sketch’s grid spacing so plan and elevation grids stay aligned. */
+  const editorSketch = useMemo((): PlanLayoutSketch => {
+    if (planViewContext.kind !== 'elevation') return sketch
+    if (sketch.gridSpacingIn === layoutSketch.gridSpacingIn) return sketch
+    return { ...sketch, gridSpacingIn: layoutSketch.gridSpacingIn }
+  }, [planViewContext.kind, sketch, layoutSketch.gridSpacingIn])
+
+  /** Ground line is shared on `layoutSketch`; merge into the sketch passed to the editor on elevations. */
+  const planSketchForEditor = useMemo((): PlanLayoutSketch => {
+    if (planViewContext.kind !== 'elevation') return editorSketch
+    return {
+      ...editorSketch,
+      elevationGroundPlaneJ: layoutSketch.elevationGroundPlaneJ,
+      elevationLevelLines: layoutSketch.elevationLevelLines,
+    }
+  }, [
+    planViewContext.kind,
+    editorSketch,
+    layoutSketch.elevationGroundPlaneJ,
+    layoutSketch.elevationLevelLines,
+  ])
+
+  const onPlanSketchCommit = useCallback(
+    (next: PlanLayoutSketch, opts?: PlanSketchCommitOptions) => {
+      if (planViewContext.kind !== 'elevation') {
+        onSketchChange(next, opts)
+        return
+      }
+      const nextJ = next.elevationGroundPlaneJ
+      const layoutJ = layoutSketch.elevationGroundPlaneJ
+      const nextLevels = next.elevationLevelLines
+      const layoutLevels = layoutSketch.elevationLevelLines
+      const groundChanged = nextJ !== layoutJ
+      const levelsChanged =
+        JSON.stringify(nextLevels ?? []) !== JSON.stringify(layoutLevels ?? [])
+      if (groundChanged || levelsChanged) {
+        const nextLayout = { ...layoutSketch }
+        if (groundChanged) {
+          if (nextJ === undefined) delete nextLayout.elevationGroundPlaneJ
+          else nextLayout.elevationGroundPlaneJ = nextJ
+        }
+        if (levelsChanged) {
+          if (!nextLevels || nextLevels.length === 0) delete nextLayout.elevationLevelLines
+          else nextLayout.elevationLevelLines = nextLevels
+        }
+        onLayoutSketchChange(nextLayout, opts)
+      }
+      const { elevationGroundPlaneJ: _gj, elevationLevelLines: _gl, ...nextBody } = next
+      const { elevationGroundPlaneJ: _cj, elevationLevelLines: _cl, ...curBody } = editorSketch
+      if (JSON.stringify(nextBody) !== JSON.stringify(curBody)) {
+        onSketchChange(nextBody as PlanLayoutSketch, opts)
+      }
+    },
+    [planViewContext.kind, layoutSketch, onLayoutSketchChange, onSketchChange, editorSketch],
+  )
+
   const mepInputRef = useRef<HTMLInputElement>(null)
   const jsonInputRef = useRef<HTMLInputElement>(null)
   const traceOverlayInputRef = useRef<HTMLInputElement>(null)
@@ -273,8 +185,33 @@ export function ImplementationPlanView({
   const [structureTool, setStructureTool] = useState<LayoutTool>('paint')
   const [roomTool, setRoomTool] = useState<RoomTool>('paint')
   const [selectedRoomZoneCellKeys, setSelectedRoomZoneCellKeys] = useState<string[] | null>(null)
+  const [roomZoneCameraRequest, setRoomZoneCameraRequest] = useState<{
+    nonce: number
+    cellKeys: string[]
+  } | null>(null)
   const [floorTool, setFloorTool] = useState<FloorTool>('paint')
-  const [measureTool, setMeasureTool] = useState<MeasureTool>('line')
+  const [annotationTool, setAnnotationTool] = useState<AnnotationTool>('measureLine')
+  const [annotationLabelDraft, setAnnotationLabelDraft] = useState('Label')
+  /** Elevation · Level line tool: optional tag placed at the left of the line. */
+  const [levelLineLabelDraft, setLevelLineLabelDraft] = useState('LL')
+  /** Mirrored from PlanLayoutEditor (annotation Select) for toolbar label editing. */
+  const [selectedAnnotationKeysFromPlan, setSelectedAnnotationKeysFromPlan] = useState<string[]>([])
+  const onSelectedAnnotationKeysChange = useCallback((keys: readonly string[]) => {
+    setSelectedAnnotationKeysFromPlan([...keys])
+  }, [])
+
+  const annotationSelectEditLabelId = useMemo(() => {
+    if (placeMode !== 'annotate' || annotationTool !== 'select') return null
+    if (selectedAnnotationKeysFromPlan.length !== 1) return null
+    const k = selectedAnnotationKeysFromPlan[0]!
+    return k.startsWith('lbl:') ? k.slice(4) : null
+  }, [placeMode, annotationTool, selectedAnnotationKeysFromPlan])
+
+  const annotationSelectEditLabel = useMemo(() => {
+    if (!annotationSelectEditLabelId) return undefined
+    return sketch.annotationLabels?.find((l) => l.id === annotationSelectEditLabelId)
+  }, [annotationSelectEditLabelId, sketch.annotationLabels])
+
   const prevPlaceModeRef = useRef(placeMode)
 
   useEffect(() => {
@@ -285,8 +222,8 @@ export function ImplementationPlanView({
     if (placeMode === 'column' && prev !== 'column') {
       setFloorTool('paint')
     }
-    if (placeMode !== 'measure' && prev === 'measure') {
-      setMeasureTool('line')
+    if (placeMode !== 'annotate' && prev === 'annotate') {
+      setAnnotationTool('measureLine')
     }
     prevPlaceModeRef.current = placeMode
   }, [placeMode, structureTool])
@@ -305,7 +242,7 @@ export function ImplementationPlanView({
   }, [placeMode])
 
   useEffect(() => {
-    if (placeMode === 'measure' || placeMode === 'room' || placeMode === 'mep') return
+    if (placeMode === 'annotate' || placeMode === 'room' || placeMode === 'mep') return
     if (activeCatalog !== 'arch') return
     const eligible = orderedSystems.filter((s) => archSystemMatchesPlanPlaceMode(s, placeMode))
     if (eligible.length === 0) return
@@ -323,10 +260,12 @@ export function ImplementationPlanView({
   const [siteDisplayUnit, setSiteDisplayUnitState] = useState<PlanSiteDisplayUnit>(() => loadSiteDisplayUnit())
   const [gridDisplayUnit, setGridDisplayUnitState] = useState<PlanSiteDisplayUnit>(() => loadGridDisplayUnit())
   const [gridDraft, setGridDraft] = useState(() =>
-    formatSiteMeasure(sketch.gridSpacingIn, loadGridDisplayUnit()),
+    formatSiteMeasure(layoutSketch.gridSpacingIn, loadGridDisplayUnit()),
   )
   const [siteWDraft, setSiteWDraft] = useState('')
   const [siteHDraft, setSiteHDraft] = useState('')
+  /** Building height (plan inches → display via `siteDisplayUnit`); stored on Floor 1 sketch for elevations. */
+  const [siteHeightDraft, setSiteHeightDraft] = useState('')
   const [setupOpen, setSetupOpen] = useState(false)
   const [layersBarHoverLayerId, setLayersBarHoverLayerId] = useState<string | null>(null)
   const [layersBarSelectRequest, setLayersBarSelectRequest] = useState<{
@@ -334,6 +273,7 @@ export function ImplementationPlanView({
     systemId: string
     nonce: number
   } | null>(null)
+  const [globalSelectAllNonce, setGlobalSelectAllNonce] = useState(0)
 
   const setSiteDisplayUnit = useCallback((u: PlanSiteDisplayUnit) => {
     setSiteDisplayUnitState(u)
@@ -357,13 +297,22 @@ export function ImplementationPlanView({
     [],
   )
 
+  const onRoomPickNavigate = useCallback((payload: { cellKeys: readonly string[]; displayName: string }) => {
+    setSelectedRoomZoneCellKeys([...payload.cellKeys])
+    setRoomNameDraft(payload.displayName)
+    setRoomZoneCameraRequest((prev) => ({
+      nonce: (prev?.nonce ?? 0) + 1,
+      cellKeys: [...payload.cellKeys],
+    }))
+  }, [])
+
   const applySelectedZoneRoomName = useCallback(() => {
     if (!selectedRoomZoneCellKeys?.length) return
     const label = roomNameDraft.trim()
     const prev = sketch.roomByCell ?? {}
     const already =
       label.length > 0
-        ? selectedRoomZoneCellKeys.every((k) => (prev[k] ?? '').trim() === label)
+        ? selectedRoomZoneCellKeys.every((k) => roomNamesEqualIgnoreCase(prev[k] ?? '', label))
         : selectedRoomZoneCellKeys.every((k) => prev[k] == null || prev[k] === '')
     if (already) return
     const next: Record<string, string> = { ...prev }
@@ -385,14 +334,46 @@ export function ImplementationPlanView({
   }, [sketch, buildingDimensions, roomNameDraft, onSketchChange])
 
   const siteResolved = useMemo(() => resolvedSiteInches(sketch, buildingDimensions), [sketch, buildingDimensions])
-  const planCanvasPx = useMemo(
-    () => ({
+  const planCanvasPx = useMemo(() => {
+    if (planViewContext.kind === 'elevation') {
+      const { widthIn, heightIn } = elevationCanvasInches(
+        planViewContext.sheet.face,
+        buildingHeightIn,
+        buildingDimensions,
+        layoutSketch,
+      )
+      return {
+        w: widthIn * buildingDimensions.planScale,
+        h: heightIn * buildingDimensions.planScale,
+      }
+    }
+    return {
       w: siteResolved.w * buildingDimensions.planScale,
       h: siteResolved.h * buildingDimensions.planScale,
-    }),
-    [siteResolved.w, siteResolved.h, buildingDimensions.planScale],
-  )
+    }
+  }, [planViewContext, buildingHeightIn, buildingDimensions, layoutSketch, siteResolved.w, siteResolved.h])
   const traceMoveRange = Math.max(400, Math.ceil(Math.max(planCanvasPx.w, planCanvasPx.h) * 1.5))
+
+  /** Elevation canvas plan inches + human hint (not rotated vs plan when N is up on the composite plan). */
+  const elevationCanvasSummary = useMemo(() => {
+    if (planViewContext.kind !== 'elevation') return null
+    const { widthIn, heightIn } = elevationCanvasInches(
+      planViewContext.sheet.face,
+      buildingHeightIn,
+      buildingDimensions,
+      layoutSketch,
+    )
+    const face = planViewContext.sheet.face
+    const alongFacade =
+      face === 'N' || face === 'S'
+        ? 'Setup / Site width (same horizontal span as Floor Layout canvas)'
+        : 'Setup / Site depth (same vertical span as Floor Layout canvas)'
+    return {
+      widthIn,
+      heightIn,
+      alongFacade,
+    }
+  }, [planViewContext, buildingHeightIn, buildingDimensions, layoutSketch])
 
   const tr = sketch.traceOverlay
   const hasTraceOverlay = tr != null
@@ -416,10 +397,86 @@ export function ImplementationPlanView({
   const fpD = buildingDimensions.footprintDepth
 
   const layersBarActiveIdentity =
-    placeMode === 'room' ? PLAN_ROOMS_LAYER_ID : `${activeCatalog}\t${activeSystemId}`
+    placeMode === 'room'
+      ? PLAN_ROOMS_LAYER_ID
+      : placeMode === 'annotate'
+        ? PLAN_ANNOTATIONS_LAYER_ID
+        : `${activeCatalog}\t${activeSystemId}`
+
+  const mepItemsForActiveSheet = useMemo(
+    () => filterMepItemsForSheet(floor1Sheet, mepItems),
+    [floor1Sheet, mepItems],
+  )
+
+  useEffect(() => {
+    const ctxKey =
+      planViewContext.kind === 'floor1'
+        ? `f1:${planViewContext.sheet.id}`
+        : `elev:${planViewContext.sheet.face}`
+    if (viewContextKeyRef.current === ctxKey) return
+    viewContextKeyRef.current = ctxKey
+
+    if (planViewContext.kind === 'elevation') {
+      setPlaceMode('annotate')
+      setActiveCatalog('arch')
+      setActiveSystemId(orderedSystems[0]?.id ?? '')
+      setAnnotationTool('groundLine')
+      setTraceOverlayEditMode(false)
+      return
+    }
+
+    setAnnotationTool((prev) =>
+      prev === 'groundLine' || prev === 'levelLine' ? 'measureLine' : prev,
+    )
+
+    const vis = floor1Sheet.visiblePlaceModes
+    const filtered = filterMepItemsForSheet(floor1Sheet, mepItems)
+    let next: PlanPlaceMode = floor1Sheet.defaultPlaceMode
+    if (next === 'mep' && (!floor1Sheet.allowsMepEditing || filtered.length === 0)) {
+      next = vis.has('annotate')
+        ? 'annotate'
+        : vis.has('structure')
+          ? 'structure'
+          : [...vis][0]!
+    }
+    if (!vis.has(next)) {
+      next = [...vis][0]!
+    }
+    setPlaceMode(next)
+    if (next === 'mep') {
+      setActiveCatalog('mep')
+      setActiveSystemId(filtered[0]?.id ?? '')
+    } else {
+      setActiveCatalog('arch')
+      setActiveSystemId(orderedSystems[0]?.id ?? '')
+    }
+    setTraceOverlayEditMode(false)
+  }, [planViewContext, floor1Sheet, mepItems, orderedSystems])
+
+  useEffect(() => {
+    if (placeMode !== 'mep' || activeCatalog !== 'mep') return
+    if (mepItemsForActiveSheet.some((m) => m.id === activeSystemId)) return
+    const first = mepItemsForActiveSheet[0]?.id
+    if (first) setActiveSystemId(first)
+    else {
+      setPlaceMode(floor1Sheet.visiblePlaceModes.has('annotate') ? 'annotate' : 'structure')
+      setActiveCatalog('arch')
+      setActiveSystemId(orderedSystems[0]?.id ?? '')
+    }
+  }, [
+    placeMode,
+    activeCatalog,
+    activeSystemId,
+    mepItemsForActiveSheet,
+    floor1Sheet.visiblePlaceModes,
+    orderedSystems,
+  ])
 
   const onLayersBarLayerActivate = useCallback(
     (source: ActiveCatalog, systemId: string) => {
+      /* Elevation sheets only support annotations; arch/MEP rows are for context — use Annotation + layers “Annotations” row. */
+      if (planViewContext.kind === 'elevation') return
+      if (source === 'mep' && !floor1Sheet.allowsMepEditing) return
       if (source === PLAN_ROOMS_LAYER_SOURCE && systemId === PLAN_ROOMS_LAYER_SYSTEM_ID) {
         setPlaceMode('room')
         setRoomTool('select')
@@ -481,12 +538,12 @@ export function ImplementationPlanView({
         nonce: (prev?.nonce ?? 0) + 1,
       }))
     },
-    [sketch.edges, sketch.cells, sketch.columns, orderedSystems],
+    [sketch.edges, sketch.cells, sketch.columns, orderedSystems, floor1Sheet.allowsMepEditing, planViewContext.kind],
   )
 
   useEffect(() => {
-    setGridDraft(formatSiteMeasure(sketch.gridSpacingIn, gridDisplayUnit))
-  }, [sketch.gridSpacingIn, gridDisplayUnit])
+    setGridDraft(formatSiteMeasure(layoutSketch.gridSpacingIn, gridDisplayUnit))
+  }, [layoutSketch.gridSpacingIn, gridDisplayUnit])
 
   useEffect(() => {
     const wIn =
@@ -495,7 +552,15 @@ export function ImplementationPlanView({
       sketch.siteDepthIn != null && Number.isFinite(sketch.siteDepthIn) ? sketch.siteDepthIn : siteResolved.h
     setSiteWDraft(formatSiteMeasure(wIn, siteDisplayUnit))
     setSiteHDraft(formatSiteMeasure(hIn, siteDisplayUnit))
-  }, [sketch.siteWidthIn, sketch.siteDepthIn, siteResolved.w, siteResolved.h, siteDisplayUnit])
+    setSiteHeightDraft(formatSiteMeasure(buildingHeightIn, siteDisplayUnit))
+  }, [
+    sketch.siteWidthIn,
+    sketch.siteDepthIn,
+    siteResolved.w,
+    siteResolved.h,
+    siteDisplayUnit,
+    buildingHeightIn,
+  ])
 
   useEffect(() => {
     if (activeCatalog === 'arch' && !orderedSystems.some((s) => s.id === activeSystemId)) {
@@ -509,23 +574,27 @@ export function ImplementationPlanView({
   const trySetGridSpacing = useCallback(
     (nextDelta: number) => {
       if (!Number.isFinite(nextDelta) || nextDelta <= 0) return
-      const hasCells = (sketch.cells ?? []).length > 0
-      if ((sketch.edges.length > 0 || hasCells) && Math.abs(nextDelta - sketch.gridSpacingIn) > 1e-6) {
+      const base = layoutSketch
+      const hasCells = (base.cells ?? []).length > 0
+      if ((base.edges.length > 0 || hasCells) && Math.abs(nextDelta - base.gridSpacingIn) > 1e-6) {
         if (!window.confirm('Changing grid spacing clears all walls and floor fills. Continue?')) return
-        onSketchChange({
-          ...sketch,
+        onLayoutSketchChange({
+          ...base,
           gridSpacingIn: nextDelta,
           edges: [],
           cells: [],
           measureRuns: [],
+          annotationGridRuns: undefined,
+          annotationLabels: undefined,
+          annotationSectionCuts: undefined,
           roomBoundaryEdges: undefined,
           roomByCell: undefined,
         })
         return
       }
-      onSketchChange({ ...sketch, gridSpacingIn: nextDelta })
+      onLayoutSketchChange({ ...base, gridSpacingIn: nextDelta })
     },
-    [sketch, onSketchChange],
+    [layoutSketch, onLayoutSketchChange],
   )
 
   const syncSiteDraftsFromSketch = useCallback(() => {
@@ -536,7 +605,8 @@ export function ImplementationPlanView({
       sketch.siteDepthIn != null && Number.isFinite(sketch.siteDepthIn) ? sketch.siteDepthIn : res.h
     setSiteWDraft(formatSiteMeasure(wIn, siteDisplayUnit))
     setSiteHDraft(formatSiteMeasure(hIn, siteDisplayUnit))
-  }, [sketch, buildingDimensions, siteDisplayUnit])
+    setSiteHeightDraft(formatSiteMeasure(buildingHeightIn, siteDisplayUnit))
+  }, [sketch, buildingDimensions, siteDisplayUnit, buildingHeightIn])
 
   const tryApplySiteDims = useCallback(() => {
     const wIn = inchesFromSiteDisplay(Number(siteWDraft), siteDisplayUnit)
@@ -553,18 +623,38 @@ export function ImplementationPlanView({
     onSketchChange({ ...sketch, siteWidthIn: wIn, siteDepthIn: hIn })
   }, [siteWDraft, siteHDraft, fpW, fpD, sketch, onSketchChange, syncSiteDraftsFromSketch, siteDisplayUnit])
 
+  const tryApplyBuildingHeight = useCallback(() => {
+    const raw = Number(siteHeightDraft)
+    if (!Number.isFinite(raw) || raw <= 0) {
+      setSiteHeightDraft(formatSiteMeasure(buildingHeightIn, siteDisplayUnit))
+      return
+    }
+    const inches = inchesFromSiteDisplay(raw, siteDisplayUnit)
+    if (!Number.isFinite(inches) || inches <= 0) {
+      setSiteHeightDraft(formatSiteMeasure(buildingHeightIn, siteDisplayUnit))
+      return
+    }
+    const maxIn = 2000 * 12
+    if (inches > maxIn) {
+      setSiteHeightDraft(formatSiteMeasure(buildingHeightIn, siteDisplayUnit))
+      return
+    }
+    onBuildingHeightInChange(inches)
+  }, [siteHeightDraft, buildingHeightIn, siteDisplayUnit, onBuildingHeightInChange])
+
   const minGridDisplay = useMemo(() => inchesToSiteDisplay(0.25, gridDisplayUnit), [gridDisplayUnit])
   const minSiteWDisplay = useMemo(() => inchesToSiteDisplay(fpW, siteDisplayUnit), [fpW, siteDisplayUnit])
   const minSiteDDisplay = useMemo(() => inchesToSiteDisplay(fpD, siteDisplayUnit), [fpD, siteDisplayUnit])
+  const minHeightDisplay = useMemo(() => inchesToSiteDisplay(0.25, siteDisplayUnit), [siteDisplayUnit])
 
   const applyGridDraftFromInput = useCallback(() => {
     const nIn = inchesFromSiteDisplay(Number(gridDraft), gridDisplayUnit)
     if (!Number.isFinite(nIn) || nIn < 0.25) {
-      setGridDraft(formatSiteMeasure(sketch.gridSpacingIn, gridDisplayUnit))
+      setGridDraft(formatSiteMeasure(layoutSketch.gridSpacingIn, gridDisplayUnit))
       return
     }
     trySetGridSpacing(nIn)
-  }, [gridDraft, gridDisplayUnit, sketch.gridSpacingIn, trySetGridSpacing])
+  }, [gridDraft, gridDisplayUnit, layoutSketch.gridSpacingIn, trySetGridSpacing])
 
   const onMepFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
@@ -583,22 +673,29 @@ export function ImplementationPlanView({
       setMepError(null)
       setMepItems(items)
       setMepFileName(f.name)
-      if (items.length) {
-        setActiveCatalog('mep')
-        setActiveSystemId(items[0]!.id)
+      if (items.length && floor1Sheet.allowsMepEditing && floor1Sheet.visiblePlaceModes.has('mep')) {
+        const filtered = filterMepItemsForSheet(floor1Sheet, items)
+        if (filtered.length) {
+          setActiveCatalog('mep')
+          setActiveSystemId(filtered[0]!.id)
+          setPlaceMode('mep')
+        }
       }
     }
     reader.readAsText(f)
-  }, [])
+  }, [floor1Sheet])
 
   const clearMep = useCallback(() => {
     setMepItems([])
     setMepFileName(null)
     setMepError(null)
-    setPlaceMode((m) => (m === 'mep' ? 'structure' : m))
+    setPlaceMode((m) => {
+      if (m !== 'mep') return m
+      return floor1Sheet.visiblePlaceModes.has('annotate') ? 'annotate' : 'structure'
+    })
     setActiveCatalog('arch')
     setActiveSystemId(orderedSystems[0]?.id ?? '')
-  }, [orderedSystems])
+  }, [orderedSystems, floor1Sheet.visiblePlaceModes])
 
   const importJson = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -607,7 +704,7 @@ export function ImplementationPlanView({
       if (!f) return
       const loaded = await readSketchFromFile(f)
       if (!loaded) {
-        alert('Invalid implementation plan JSON.')
+        alert('Invalid layout JSON.')
         return
       }
       onSketchChange(loaded)
@@ -660,14 +757,14 @@ export function ImplementationPlanView({
       catalog: 'mep' as const,
       id: m.id,
     })
-    if (placeMode === 'measure') {
+    if (placeMode === 'annotate') {
       return []
     }
     if (placeMode === 'room') {
       return []
     }
     if (placeMode === 'mep') {
-      return mepItems.map(mepOption)
+      return mepItemsForActiveSheet.map(mepOption)
     }
     const archSystems = orderedSystems.filter((s) => archSystemMatchesPlanPlaceMode(s, placeMode))
     const arch = archSystems.map((s) => {
@@ -680,10 +777,14 @@ export function ImplementationPlanView({
         id: s.id,
       }
     })
-    const mep = mepItems.map(mepOption)
     if (placeMode !== 'structure') return arch
-    return [...arch, ...mep]
-  }, [buildingDimensions.thicknessBySystem, orderedSystems, mepItems, placeMode])
+    return arch
+  }, [
+    buildingDimensions.thicknessBySystem,
+    orderedSystems,
+    mepItemsForActiveSheet,
+    placeMode,
+  ])
 
   const selectValue = `${activeCatalog}:${activeSystemId}`
 
@@ -693,7 +794,7 @@ export function ImplementationPlanView({
     if (cat === 'arch') {
       setActiveCatalog('arch')
       setActiveSystemId(id)
-      if (placeMode !== 'measure' && placeMode !== 'room' && placeMode !== 'mep') {
+      if (placeMode !== 'annotate' && placeMode !== 'room' && placeMode !== 'mep') {
         setArchSystemIdByPlaceMode((prev) => ({ ...prev, [placeMode]: id }))
       }
     } else if (cat === 'mep') {
@@ -713,13 +814,79 @@ export function ImplementationPlanView({
   const layerBtnOn = (mode: PlanPlaceMode) =>
     !traceOverlayEditMode && placeMode === mode ? btnOn : btnIdle
 
+  const handleGlobalSelectAll = useCallback(() => {
+    if (setupOpen) return
+    if (traceOverlayEditMode && hasTraceOverlay) return
+    if (planViewContext.kind === 'elevation') {
+      setAnnotationTool('select')
+      setGlobalSelectAllNonce((n) => n + 1)
+      return
+    }
+    switch (placeMode) {
+      case 'structure':
+      case 'window':
+      case 'door':
+      case 'roof':
+      case 'mep':
+        setStructureTool('select')
+        break
+      case 'floor':
+      case 'stairs':
+      case 'column':
+        setFloorTool('select')
+        break
+      case 'room':
+        setRoomTool('select')
+        break
+      case 'annotate':
+        setAnnotationTool('select')
+        break
+    }
+    setGlobalSelectAllNonce((n) => n + 1)
+  }, [
+    setupOpen,
+    traceOverlayEditMode,
+    hasTraceOverlay,
+    planViewContext.kind,
+    placeMode,
+  ])
+
+  const showLayerMode = (mode: PlanPlaceMode) => floor1Sheet.visiblePlaceModes.has(mode)
+
+  const planVisualProfile =
+    planViewContext.kind === 'elevation'
+      ? { mode: 'layout' as const, tradeMepSheetId: null }
+      : floor1Sheet.visualMode === 'layout'
+        ? { mode: 'layout' as const, tradeMepSheetId: null }
+        : floor1Sheet.visualMode === 'interior'
+          ? { mode: 'interior' as const, tradeMepSheetId: null }
+          : {
+              mode: 'trade_mep' as const,
+              tradeMepSheetId: floor1Sheet.mepDisciplineFilterSheet,
+            }
+
   return (
     <div className={cn('flex flex-col flex-1 min-h-0 overflow-hidden', className)}>
       <div className="flex flex-col gap-2 px-4 py-2 border-b border-border bg-white shrink-0">
-        <div className="flex flex-wrap items-center gap-2 min-h-0">
-          <span className="font-mono text-[9px] font-bold tracking-widest uppercase text-foreground">
-            Implementation plan
-          </span>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-h-0">
+          <div className="flex flex-col min-w-0">
+            <span className="font-mono text-[9px] font-bold tracking-widest uppercase text-foreground">
+              {planViewContext.kind === 'elevation'
+                ? `Elevation ${planViewContext.sheet.face}`
+                : floor1Sheet.label}
+            </span>
+            {elevationCanvasSummary && (
+              <span
+                className="font-mono text-[8px] text-muted-foreground leading-snug max-w-[min(100%,42rem)]"
+                title="Canvas axes: left–right = along the façade on the plan; top–bottom = building height. Same grid spacing as Floor Layout."
+              >
+                Canvas{' '}
+                {formatSiteMeasure(elevationCanvasSummary.widthIn, 'ft', 3)} wide ×{' '}
+                {formatSiteMeasure(elevationCanvasSummary.heightIn, 'ft', 3)} tall · horizontal ={' '}
+                {elevationCanvasSummary.alongFacade}
+              </span>
+            )}
+          </div>
           <button
             type="button"
             onClick={() => setSetupOpen((o) => !o)}
@@ -729,6 +896,21 @@ export function ImplementationPlanView({
             {setupOpen ? 'Back to plan' : 'Setup'}
           </button>
           <div className="flex-1 min-w-[1rem]" />
+          <button
+            type="button"
+            disabled={setupOpen || (traceOverlayEditMode && hasTraceOverlay)}
+            onClick={handleGlobalSelectAll}
+            className={`${btnIdle} disabled:opacity-40`}
+            title={
+              setupOpen
+                ? 'Available when the plan editor is visible'
+                : traceOverlayEditMode && hasTraceOverlay
+                  ? 'Finish trace overlay adjust first'
+                  : 'Select everything on the current layer tool (all walls, floor cells, room lines, annotations, …) — switches to Select where needed'
+            }
+          >
+            Select all
+          </button>
           <button
             type="button"
             disabled={!canUndo}
@@ -752,125 +934,159 @@ export function ImplementationPlanView({
         {!setupOpen && (
           <div className="flex flex-col lg:flex-row lg:items-start gap-2 lg:justify-between min-w-0">
             <div className="flex flex-wrap items-stretch gap-2 min-w-0 flex-1">
+              <input
+                ref={traceOverlayInputRef}
+                type="file"
+                accept="image/jpeg,image/png,.jpg,.jpeg,.png"
+                className="hidden"
+                onChange={onTraceOverlayFile}
+              />
               <ToolbarGroup title="Layer">
-                <input
-                  ref={traceOverlayInputRef}
-                  type="file"
-                  accept="image/jpeg,image/png,.jpg,.jpeg,.png"
-                  className="hidden"
-                  onChange={onTraceOverlayFile}
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTraceOverlayEditMode(false)
-                    setPlaceMode('structure')
-                  }}
-                  className={layerBtnOn('structure')}
-                >
-                  Walls
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTraceOverlayEditMode(false)
-                    setPlaceMode('roof')
-                  }}
-                  className={layerBtnOn('roof')}
-                >
-                  Roof
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTraceOverlayEditMode(false)
-                    setPlaceMode('window')
-                  }}
-                  className={layerBtnOn('window')}
-                >
-                  Windows
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTraceOverlayEditMode(false)
-                    setPlaceMode('door')
-                  }}
-                  className={layerBtnOn('door')}
-                >
-                  Doors
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTraceOverlayEditMode(false)
-                    setPlaceMode('stairs')
-                  }}
-                  className={layerBtnOn('stairs')}
-                  title="Paint full grid squares for stairs (same tools as Floor: Paint / Erase / Select)"
-                >
-                  Stairs
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTraceOverlayEditMode(false)
-                    setPlaceMode('mep')
-                  }}
-                  disabled={mepItems.length === 0}
-                  title={mepItems.length === 0 ? 'Load an MEP CSV in Setup first' : 'MEP runs on grid edges'}
-                  className={cn(layerBtnOn('mep'), 'disabled:opacity-40')}
-                >
-                  MEP
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTraceOverlayEditMode(false)
-                    setPlaceMode('column')
-                  }}
-                  className={layerBtnOn('column')}
-                  title="Place square column footprints from catalog systems (Plan_Draw_Layers: column)"
-                >
-                  Columns
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTraceOverlayEditMode(false)
-                    setPlaceMode('floor')
-                  }}
-                  className={layerBtnOn('floor')}
-                >
-                  Floor
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTraceOverlayEditMode(false)
-                    setPlaceMode('room')
-                  }}
-                  className={layerBtnOn('room')}
-                  title="Draw room boundaries with Line / Rect below, then Fill to name each zone"
-                >
-                  Room
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTraceOverlayEditMode(false)
-                    setPlaceMode('measure')
-                  }}
-                  className={layerBtnOn('measure')}
-                  title="Aligned dimension between two clicks (plan units from Setup)"
-                >
-                  Measure
-                </button>
+                {planViewContext.kind !== 'elevation' && showLayerMode('structure') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTraceOverlayEditMode(false)
+                      setPlaceMode('structure')
+                    }}
+                    className={layerBtnOn('structure')}
+                  >
+                    Walls
+                  </button>
+                )}
+                {planViewContext.kind !== 'elevation' && showLayerMode('roof') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTraceOverlayEditMode(false)
+                      setPlaceMode('roof')
+                    }}
+                    className={layerBtnOn('roof')}
+                  >
+                    Roof
+                  </button>
+                )}
+                {planViewContext.kind !== 'elevation' && showLayerMode('window') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTraceOverlayEditMode(false)
+                      setPlaceMode('window')
+                    }}
+                    className={layerBtnOn('window')}
+                  >
+                    Windows
+                  </button>
+                )}
+                {planViewContext.kind !== 'elevation' && showLayerMode('door') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTraceOverlayEditMode(false)
+                      setPlaceMode('door')
+                    }}
+                    className={layerBtnOn('door')}
+                  >
+                    Doors
+                  </button>
+                )}
+                {planViewContext.kind !== 'elevation' && showLayerMode('stairs') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTraceOverlayEditMode(false)
+                      setPlaceMode('stairs')
+                    }}
+                    className={layerBtnOn('stairs')}
+                    title="Paint full grid squares for stairs (same tools as Floor: Paint / Erase / Select)"
+                  >
+                    Stairs
+                  </button>
+                )}
+                {planViewContext.kind !== 'elevation' && showLayerMode('mep') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTraceOverlayEditMode(false)
+                      setPlaceMode('mep')
+                    }}
+                    disabled={mepItems.length === 0 || mepItemsForActiveSheet.length === 0}
+                    title={
+                      mepItems.length === 0
+                        ? 'Load an MEP CSV in Setup first'
+                        : mepItemsForActiveSheet.length === 0
+                          ? `No MEP rows match this sheet’s discipline in the CSV`
+                          : 'MEP runs on grid edges (this sheet’s systems only)'
+                    }
+                    className={cn(layerBtnOn('mep'), 'disabled:opacity-40')}
+                  >
+                    MEP
+                  </button>
+                )}
+                {planViewContext.kind !== 'elevation' && showLayerMode('column') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTraceOverlayEditMode(false)
+                      setPlaceMode('column')
+                    }}
+                    className={layerBtnOn('column')}
+                    title="Place square column footprints from catalog systems (Plan_Draw_Layers: column)"
+                  >
+                    Columns
+                  </button>
+                )}
+                {planViewContext.kind !== 'elevation' && showLayerMode('floor') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTraceOverlayEditMode(false)
+                      setPlaceMode('floor')
+                    }}
+                    className={layerBtnOn('floor')}
+                  >
+                    Floor
+                  </button>
+                )}
+                {planViewContext.kind !== 'elevation' && showLayerMode('room') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTraceOverlayEditMode(false)
+                      setPlaceMode('room')
+                    }}
+                    className={layerBtnOn('room')}
+                    title="Draw room boundaries with Line / Rect below, then Fill to name each zone"
+                  >
+                    Room
+                  </button>
+                )}
+                {showLayerMode('annotate') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTraceOverlayEditMode(false)
+                      setPlaceMode('annotate')
+                    }}
+                    className={layerBtnOn('annotate')}
+                    title={
+                      planViewContext.kind === 'elevation'
+                        ? 'Annotations on this elevation — same tools as floor layout, plus ground line (toolbar below)'
+                        : 'Dimensions, grid reference lines, text labels, and section cuts (plan units from Setup)'
+                    }
+                  >
+                    Annotation
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => traceOverlayInputRef.current?.click()}
                   className={btnIdle}
-                  title="Place a JPEG or PNG over the plan (above walls; fade to compare)"
+                  title={
+                    planViewContext.kind === 'elevation'
+                      ? 'Place a JPEG or PNG over the elevation (above the grid; fade to compare)'
+                      : 'Place a JPEG or PNG over the plan (above walls; fade to compare)'
+                  }
                 >
                   Add new overlay…
                 </button>
@@ -961,9 +1177,11 @@ export function ImplementationPlanView({
             <section className="rounded-lg border border-border bg-white p-4 shadow-sm space-y-3">
               <h3 className={setupSectionTitle}>Grid</h3>
               <p className={setupHelp}>
-                Spacing between grid nodes for walls and floor cells. Stored as plan inches in the sketch; pick the unit you
-                want for typing here (saved in this browser). Changing Δ clears walls and floor fills if anything is already
-                drawn.
+                Spacing between grid nodes for walls and floor cells — this is the <span className="text-foreground/80">same</span>{' '}
+                Δ for the Floor Layout and all elevation sheets. Elevation canvas width/depth match the Site lot dimensions and
+                height from Setup (layout sketch), not separate CSV-only sizes. Stored as plan inches in the layout sketch; pick
+                the unit you want for typing here (saved in this browser). Changing Δ clears walls and floor fills on the layout
+                if anything is already drawn there.
               </p>
               <label className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-muted-foreground">
                 Grid spacing unit
@@ -1018,9 +1236,10 @@ export function ImplementationPlanView({
             <section className="rounded-lg border border-border bg-white p-4 shadow-sm space-y-3">
               <h3 className={setupSectionTitle}>Site</h3>
               <p className={setupHelp}>
-                Lot width and depth (minimum = building footprint in each direction). Values are stored as plan inches;
-                pick the unit you want for typing here (saved in this browser). The plan canvas uses this rectangle as the
-                yard around the building.
+                Lot width and depth (minimum = building footprint in each direction). Height is the building’s vertical
+                extent for elevation sheets and export (stored as plan inches on the Floor 1 sketch). Pick the unit you want
+                for typing here (saved in this browser). Width and depth define the plan lot; the plan canvas uses that
+                rectangle as the yard around the building.
               </p>
               <label className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-muted-foreground">
                 Site dimensions unit
@@ -1073,6 +1292,25 @@ export function ImplementationPlanView({
                     className="w-28 border border-border px-2 py-1 font-mono text-[11px] bg-white rounded-sm"
                   />
                 </label>
+                <label className="flex flex-col gap-1 font-mono text-[10px] text-muted-foreground">
+                  Height ({PLAN_SITE_UNIT_SHORT[siteDisplayUnit]})
+                  <input
+                    type="number"
+                    min={minHeightDisplay}
+                    step={siteInputStep(siteDisplayUnit)}
+                    value={siteHeightDraft}
+                    onChange={(e) => setSiteHeightDraft(e.target.value)}
+                    onBlur={tryApplyBuildingHeight}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        tryApplyBuildingHeight()
+                        ;(e.target as HTMLInputElement).blur()
+                      }
+                    }}
+                    className="w-28 border border-border px-2 py-1 font-mono text-[11px] bg-white rounded-sm"
+                    title="Building height; stored on the Floor 1 sketch; used for elevation canvas height"
+                  />
+                </label>
               </div>
             </section>
 
@@ -1107,7 +1345,7 @@ export function ImplementationPlanView({
             <section className="rounded-lg border border-border bg-white p-4 shadow-sm space-y-3">
               <h3 className={setupSectionTitle}>Sketch import / export</h3>
               <p className={setupHelp}>
-                Save the full implementation plan (grid, site, walls, floor, MEP lines) as JSON, or load a previously
+                Save the full layout sketch (grid, site, walls, floor, MEP lines) as JSON, or load a previously
                 exported file. Import replaces the current sketch.
               </p>
               <input ref={jsonInputRef} type="file" accept=".json,application/json" className="hidden" onChange={importJson} />
@@ -1125,140 +1363,44 @@ export function ImplementationPlanView({
       ) : (
         <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
           <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-            {/* Below PlanLayoutEditor zoom strip (~48px); centered over scroll/plan */}
-            <div className="pointer-events-none absolute inset-x-0 top-12 z-20 flex justify-center px-3 sm:px-4">
-              <div className="pointer-events-auto w-full max-w-md min-w-0">
-                <ToolbarGroup
-                  title={
-                    traceOverlayEditMode
-                      ? 'Drawing paused'
-                      : placeMode === 'measure'
-                        ? measureTool === 'line'
-                          ? 'Measure · Line'
-                          : 'Measure · Erase'
-                        : placeMode === 'room'
-                          ? roomTool === 'fill'
-                            ? 'Room · Fill'
-                            : roomTool === 'autoFill'
-                              ? 'Room · Auto-fill'
-                              : roomTool === 'paint'
-                                ? 'Room · Line'
-                                : roomTool === 'rect'
-                                  ? 'Room · Rect'
-                                  : roomTool === 'erase'
-                                    ? 'Room · Erase'
-                                    : 'Room · Select'
-                          : placeMode === 'column'
-                            ? floorTool === 'erase'
-                              ? 'Columns · Erase'
-                              : 'Columns · Paint'
-                            : placeMode === 'floor' || placeMode === 'stairs'
-                              ? 'Paint with'
-                              : structureTool === 'rect'
-                              ? 'Rectangle with'
-                              : 'Line with'
-                  }
-                  className="min-w-[12rem] border-border/80 bg-white/95 shadow-lg backdrop-blur-sm"
-                  bodyClassName="flex-col items-stretch w-full min-w-0"
-                >
-                  {traceOverlayEditMode ? (
-                    <p className="font-mono text-[9px] text-muted-foreground leading-snug px-0.5 py-1">
-                      Layer tools are off while you adjust the trace. Press <span className="text-foreground/80">Done</span>{' '}
-                      in the bottom overlay panel to return to{' '}
-                      {placeMode === 'measure'
-                        ? 'Measure'
-                        : placeMode === 'floor' || placeMode === 'stairs'
-                          ? 'cell paint'
-                          : placeMode === 'column'
-                            ? 'columns'
-                            : placeMode === 'room'
-                              ? 'room naming'
-                              : 'walls and lines'}.
-                    </p>
-                  ) : placeMode === 'room' && roomTool === 'fill' ? (
-                    <label className="flex flex-col gap-1 w-full min-w-0 font-mono text-[9px] text-muted-foreground">
-                      <span className="uppercase tracking-wide">Fill — room name</span>
-                      <input
-                        type="text"
-                        value={roomNameDraft}
-                        onChange={(ev) => setRoomNameDraft(ev.target.value)}
-                        placeholder="Room name"
-                        className="w-full border border-border px-2 py-1.5 font-mono text-[11px] text-foreground bg-white rounded-sm"
-                        title="Click inside a zone bounded by walls or room lines to set this name. Clear the field and click to remove names from that zone."
-                      />
-                    </label>
-                  ) : placeMode === 'room' && roomTool === 'autoFill' ? (
-                    <div className="flex flex-col gap-2 w-full min-w-0 font-mono text-[9px] text-muted-foreground">
-                      <label className="flex flex-col gap-1">
-                        <span className="uppercase tracking-wide">Auto-fill — name prefix</span>
-                        <input
-                          type="text"
-                          value={roomNameDraft}
-                          onChange={(ev) => setRoomNameDraft(ev.target.value)}
-                          placeholder="Room (default)"
-                          className="w-full border border-border px-2 py-1.5 font-mono text-[11px] text-foreground bg-white rounded-sm"
-                          title="Each enclosed zone becomes “Prefix 1”, “Prefix 2”, … in stable order. Empty field uses “Room”."
-                        />
-                      </label>
-                      <button
-                        type="button"
-                        onClick={applyAutoFillAllRooms}
-                        className="w-full border border-border bg-white px-2 py-1.5 font-mono text-[10px] text-foreground rounded-sm hover:bg-muted/40"
-                        title="Assign sequential names to every enclosed zone at once"
-                      >
-                        Name all enclosed zones
-                      </button>
-                    </div>
-                  ) : placeMode === 'room' && roomTool === 'select' ? (
-                    <label className="flex flex-col gap-1 w-full min-w-0 font-mono text-[9px] text-muted-foreground">
-                      <span className="uppercase tracking-wide">Select — zone name</span>
-                      <input
-                        type="text"
-                        value={roomNameDraft}
-                        onChange={(ev) => setRoomNameDraft(ev.target.value)}
-                        onBlur={() => applySelectedZoneRoomName()}
-                        onKeyDown={(ev) => {
-                          if (ev.key === 'Enter') {
-                            ev.preventDefault()
-                            applySelectedZoneRoomName()
-                            ;(ev.target as HTMLInputElement).blur()
-                          }
-                        }}
-                        placeholder={
-                          selectedRoomZoneCellKeys?.length
-                            ? 'Room name'
-                            : 'Click a filled room on the plan (away from boundary lines)'
-                        }
-                        disabled={!selectedRoomZoneCellKeys?.length}
-                        className="w-full border border-border px-2 py-1.5 font-mono text-[11px] text-foreground bg-white rounded-sm disabled:opacity-50"
-                        title="Select a zone on the plan, edit the name, then blur the field or press Enter to apply. Clear the name and apply to remove labels from that zone."
-                      />
-                    </label>
-                  ) : placeMode === 'room' ? (
-                    <p className="font-mono text-[9px] text-muted-foreground leading-snug px-0.5 py-1">
-                      Use <span className="text-foreground/80">Line</span> or{' '}
-                      <span className="text-foreground/80">Rect</span> for room boundaries, or close areas with{' '}
-                      <span className="text-foreground/80">walls</span>. Use <span className="text-foreground/80">Fill</span> to
-                      name one zone per click, or <span className="text-foreground/80">Auto-fill</span> to number every zone at
-                      once.
-                    </p>
-                  ) : (
-                    <PlanSystemPicker
-                      options={systemOptions}
-                      value={selectValue}
-                      placeMode={placeMode}
-                      planColorCatalog={planColorCatalog}
-                      onChange={onSelectSystem}
-                      disabled={systemOptions.length === 0 || placeMode === 'measure'}
-                    />
-                  )}
-                </ToolbarGroup>
-              </div>
-            </div>
-            <PlanLayoutEditor
-              buildingDimensions={buildingDimensions}
+            <ImplementationPlanFloatingToolbar
+              traceOverlayEditMode={traceOverlayEditMode}
+              placeMode={placeMode}
+              annotationTool={annotationTool}
+              roomTool={roomTool}
+              floorTool={floorTool}
+              structureTool={structureTool}
+              planViewContext={planViewContext}
+              levelLineLabelDraft={levelLineLabelDraft}
+              setLevelLineLabelDraft={setLevelLineLabelDraft}
+              annotationLabelDraft={annotationLabelDraft}
+              setAnnotationLabelDraft={setAnnotationLabelDraft}
+              annotationSelectEditLabel={
+                annotationSelectEditLabel
+                  ? { id: annotationSelectEditLabel.id, text: annotationSelectEditLabel.text }
+                  : undefined
+              }
+              annotationSelectEditLabelId={annotationSelectEditLabelId}
               sketch={sketch}
               onSketchChange={onSketchChange}
+              roomPickerSketch={planSketchForEditor}
+              buildingDimensions={buildingDimensions}
+              onRoomPickNavigate={onRoomPickNavigate}
+              roomNameDraft={roomNameDraft}
+              setRoomNameDraft={setRoomNameDraft}
+              selectedRoomZoneCellKeys={selectedRoomZoneCellKeys}
+              applySelectedZoneRoomName={applySelectedZoneRoomName}
+              applyAutoFillAllRooms={applyAutoFillAllRooms}
+              systemOptions={systemOptions}
+              selectValue={selectValue}
+              planColorCatalog={planColorCatalog}
+              onSelectSystem={onSelectSystem}
+            />
+
+            <PlanLayoutEditor
+              buildingDimensions={buildingDimensions}
+              sketch={planSketchForEditor}
+              onSketchChange={onPlanSketchCommit}
               activeCatalog={activeCatalog}
               activeSystemId={activeSystemId}
               placeMode={placeMode}
@@ -1266,11 +1408,26 @@ export function ImplementationPlanView({
               roomTool={roomTool}
               structureTool={structureTool}
               floorTool={floorTool}
-              measureTool={measureTool}
+              annotationTool={annotationTool}
+              annotationLabelDraft={annotationLabelDraft}
+              levelLineLabelDraft={levelLineLabelDraft}
+              onSelectedAnnotationKeysChange={onSelectedAnnotationKeysChange}
               mepItems={mepItems}
               orderedSystems={orderedSystems}
               planColorCatalog={planColorCatalog}
               planSiteDisplayUnit={siteDisplayUnit}
+              canvasExtentsIn={
+                planViewContext.kind === 'elevation'
+                  ? elevationCanvasInches(
+                      planViewContext.sheet.face,
+                      buildingHeightIn,
+                      buildingDimensions,
+                      layoutSketch,
+                    )
+                  : null
+              }
+              allowMepEditing={floor1Sheet.allowsMepEditing}
+              planVisualProfile={planVisualProfile}
               traceOverlay={
                 tr
                   ? {
@@ -1287,293 +1444,38 @@ export function ImplementationPlanView({
               suspendPlanPainting={traceOverlayEditMode && hasTraceOverlay}
               layersBarHoverLayerId={layersBarHoverLayerId}
               layersBarSelectRequest={layersBarSelectRequest}
+              globalSelectAllNonce={globalSelectAllNonce}
               selectedRoomZoneCellKeys={selectedRoomZoneCellKeys}
               onRoomZoneSelect={onRoomZoneSelect}
+              roomZoneCameraRequest={roomZoneCameraRequest}
               className="flex flex-col flex-1 min-h-0"
             />
-            <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-3 sm:px-4">
-              <div
-                className={cn(
-                  'pointer-events-auto min-w-0',
-                  traceOverlayEditMode && hasTraceOverlay
-                    ? 'w-full max-w-md'
-                    : 'w-max max-w-[min(100%,24rem)]',
-                )}
-              >
-                <ToolbarGroup
-                  title={traceOverlayEditMode && hasTraceOverlay ? 'Overlay' : 'Tool'}
-                  className="border-border/80 bg-white/95 shadow-lg backdrop-blur-sm"
-                  bodyClassName={
-                    traceOverlayEditMode && hasTraceOverlay
-                      ? 'flex-col items-stretch gap-2 w-full min-w-0'
-                      : undefined
-                  }
-                >
-                  {traceOverlayEditMode && hasTraceOverlay && tr ? (
-                    <>
-                      <div className="flex items-center gap-1.5 w-full min-w-0">
-                        <span className="font-mono text-[8px] text-muted-foreground w-5 shrink-0 uppercase">
-                          X
-                        </span>
-                        <input
-                          type="range"
-                          min={-traceMoveRange}
-                          max={traceMoveRange}
-                          step={1}
-                          value={Math.max(-traceMoveRange, Math.min(traceMoveRange, traceTx))}
-                          onChange={(ev) =>
-                            onSketchChange(
-                              { ...sketch, traceOverlay: { ...tr, tx: Number(ev.target.value) } },
-                              { skipUndo: true },
-                            )
-                          }
-                          className="flex-1 min-w-0 h-1 accent-foreground cursor-pointer"
-                          title="Move trace horizontally (plan px)"
-                        />
-                        <input
-                          type="number"
-                          step={1}
-                          value={traceTx}
-                          onChange={(ev) => {
-                            const v = Number(ev.target.value)
-                            if (Number.isFinite(v)) {
-                              onSketchChange({ ...sketch, traceOverlay: { ...tr, tx: v } }, { skipUndo: true })
-                            }
-                          }}
-                          className="w-[4.25rem] shrink-0 border border-border px-1 py-0.5 font-mono text-[10px] bg-white rounded-sm tabular-nums"
-                        />
-                      </div>
-                      <div className="flex items-center gap-1.5 w-full min-w-0">
-                        <span className="font-mono text-[8px] text-muted-foreground w-5 shrink-0 uppercase">
-                          Y
-                        </span>
-                        <input
-                          type="range"
-                          min={-traceMoveRange}
-                          max={traceMoveRange}
-                          step={1}
-                          value={Math.max(-traceMoveRange, Math.min(traceMoveRange, traceTy))}
-                          onChange={(ev) =>
-                            onSketchChange(
-                              { ...sketch, traceOverlay: { ...tr, ty: Number(ev.target.value) } },
-                              { skipUndo: true },
-                            )
-                          }
-                          className="flex-1 min-w-0 h-1 accent-foreground cursor-pointer"
-                          title="Move trace vertically (plan px)"
-                        />
-                        <input
-                          type="number"
-                          step={1}
-                          value={traceTy}
-                          onChange={(ev) => {
-                            const v = Number(ev.target.value)
-                            if (Number.isFinite(v)) {
-                              onSketchChange({ ...sketch, traceOverlay: { ...tr, ty: v } }, { skipUndo: true })
-                            }
-                          }}
-                          className="w-[4.25rem] shrink-0 border border-border px-1 py-0.5 font-mono text-[10px] bg-white rounded-sm tabular-nums"
-                        />
-                      </div>
-                      <div className="flex items-center gap-1.5 w-full min-w-0">
-                        <span className="font-mono text-[8px] text-muted-foreground w-5 shrink-0">°</span>
-                        <input
-                          type="range"
-                          min={-180}
-                          max={180}
-                          step={1}
-                          value={Math.max(-180, Math.min(180, traceRotateDeg))}
-                          onChange={(ev) =>
-                            onSketchChange(
-                              { ...sketch, traceOverlay: { ...tr, rotateDeg: Number(ev.target.value) } },
-                              { skipUndo: true },
-                            )
-                          }
-                          className="flex-1 min-w-0 h-1 accent-foreground cursor-pointer"
-                          title="Rotate around plan center (degrees)"
-                        />
-                        <input
-                          type="number"
-                          step={1}
-                          value={traceRotateDeg}
-                          onChange={(ev) => {
-                            const v = Number(ev.target.value)
-                            if (Number.isFinite(v)) {
-                              onSketchChange(
-                                { ...sketch, traceOverlay: { ...tr, rotateDeg: v } },
-                                { skipUndo: true },
-                              )
-                            }
-                          }}
-                          className="w-[4.25rem] shrink-0 border border-border px-1 py-0.5 font-mono text-[10px] bg-white rounded-sm tabular-nums"
-                        />
-                      </div>
-                      <div className="flex items-center gap-1.5 w-full min-w-0">
-                        <span className="font-mono text-[8px] text-muted-foreground w-5 shrink-0">%</span>
-                        <input
-                          type="range"
-                          min={20}
-                          max={400}
-                          step={1}
-                          value={Math.round(traceScale * 100)}
-                          onChange={(ev) =>
-                            onSketchChange(
-                              { ...sketch, traceOverlay: { ...tr, scale: Number(ev.target.value) / 100 } },
-                              { skipUndo: true },
-                            )
-                          }
-                          className="flex-1 min-w-0 h-1 accent-foreground cursor-pointer"
-                          title="Uniform scale (100% = fit box)"
-                        />
-                        <input
-                          type="number"
-                          min={5}
-                          max={800}
-                          step={1}
-                          value={Math.round(traceScale * 100)}
-                          onChange={(ev) => {
-                            const v = Number(ev.target.value)
-                            if (Number.isFinite(v) && v > 0) {
-                              onSketchChange(
-                                { ...sketch, traceOverlay: { ...tr, scale: v / 100 } },
-                                { skipUndo: true },
-                              )
-                            }
-                          }}
-                          className="w-[4.25rem] shrink-0 border border-border px-1 py-0.5 font-mono text-[10px] bg-white rounded-sm tabular-nums"
-                        />
-                      </div>
-                      <div className="flex flex-wrap gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => setTraceOverlayEditMode(false)}
-                          className={btnOn}
-                          title="Return to drawing tools"
-                        >
-                          Done
-                        </button>
-                        <button
-                          type="button"
-                          onClick={resetTraceOverlayTransform}
-                          className={btnIdle}
-                          title="Reset move, rotation, and scale"
-                        >
-                          Reset
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      {placeMode !== 'floor' &&
-                        placeMode !== 'stairs' &&
-                        placeMode !== 'column' &&
-                        placeMode !== 'measure' &&
-                        placeMode !== 'room' &&
-                        (['paint', 'rect', 'erase', 'select'] as const).map((t) => (
-                          <button
-                            key={t}
-                            type="button"
-                            onClick={() => setStructureTool(t)}
-                            className={structureTool === t ? btnOn : btnIdle}
-                          >
-                            {t === 'paint'
-                              ? 'Line'
-                              : t === 'rect'
-                                ? 'Rect'
-                                : t === 'erase'
-                                  ? 'Erase'
-                                  : 'Select'}
-                          </button>
-                        ))}
-                      {placeMode === 'room' &&
-                        (['paint', 'rect', 'erase', 'select', 'fill', 'autoFill'] as const).map((t) => (
-                          <button
-                            key={t}
-                            type="button"
-                            onClick={() => setRoomTool(t)}
-                            className={roomTool === t ? btnOn : btnIdle}
-                            title={
-                              t === 'fill'
-                                ? 'Click inside a closed zone to apply the room name from the top field'
-                                : t === 'autoFill'
-                                  ? 'Assign “Prefix 1”, “Prefix 2”, … to every enclosed zone (toolbar button)'
-                                  : t === 'select'
-                                    ? 'Click inside a filled room (not on a boundary line) to select it, then edit the name above'
-                                    : undefined
-                            }
-                          >
-                            {t === 'paint'
-                              ? 'Line'
-                              : t === 'rect'
-                                ? 'Rect'
-                                : t === 'erase'
-                                  ? 'Erase'
-                                  : t === 'select'
-                                    ? 'Select'
-                                    : t === 'fill'
-                                      ? 'Fill'
-                                      : 'Auto'}
-                          </button>
-                        ))}
-                      {(placeMode === 'floor' || placeMode === 'stairs') &&
-                        (['paint', 'fill', 'erase', 'select'] as const).map((t) => (
-                          <button
-                            key={t}
-                            type="button"
-                            onClick={() => setFloorTool(t)}
-                            className={floorTool === t ? btnOn : btnIdle}
-                            title={
-                              t === 'fill'
-                                ? 'Drag a rectangle to fill every grid cell inside with the current catalog layer'
-                                : undefined
-                            }
-                          >
-                            {t === 'paint'
-                              ? 'Paint'
-                              : t === 'fill'
-                                ? 'Fill'
-                                : t === 'erase'
-                                  ? 'Erase'
-                                  : 'Select'}
-                          </button>
-                        ))}
-                      {placeMode === 'column' &&
-                        (['paint', 'erase'] as const).map((t) => (
-                          <button
-                            key={t}
-                            type="button"
-                            onClick={() => setFloorTool(t)}
-                            className={floorTool === t ? btnOn : btnIdle}
-                          >
-                            {t === 'paint' ? 'Paint' : 'Erase'}
-                          </button>
-                        ))}
-                      {placeMode === 'measure' && (
-                        <div className="flex flex-wrap gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => setMeasureTool('line')}
-                            className={measureTool === 'line' ? btnOn : btnIdle}
-                            title="Drag along grid edges to place a dimension run"
-                          >
-                            Line
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setMeasureTool('erase')}
-                            className={measureTool === 'erase' ? btnOn : btnIdle}
-                            title="Click a segment of an existing dimension run to remove it"
-                          >
-                            Erase
-                          </button>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </ToolbarGroup>
-              </div>
-            </div>
+            <ImplementationPlanBottomToolbar
+              traceOverlayEditMode={traceOverlayEditMode}
+              hasTraceOverlay={hasTraceOverlay}
+              tr={tr}
+              sketch={sketch}
+              onSketchChange={onSketchChange}
+              traceMoveRange={traceMoveRange}
+              traceTx={traceTx}
+              traceTy={traceTy}
+              traceRotateDeg={traceRotateDeg}
+              traceScale={traceScale}
+              resetTraceOverlayTransform={resetTraceOverlayTransform}
+              planViewContext={planViewContext}
+              placeMode={placeMode}
+              structureTool={structureTool}
+              setStructureTool={setStructureTool}
+              roomTool={roomTool}
+              setRoomTool={setRoomTool}
+              floorTool={floorTool}
+              setFloorTool={setFloorTool}
+              annotationTool={annotationTool}
+              setAnnotationTool={setAnnotationTool}
+              setTraceOverlayEditMode={setTraceOverlayEditMode}
+            />
           </div>
+
           <PlanSketchLayersBar
             buildingDimensions={buildingDimensions}
             sketch={sketch}
@@ -1585,11 +1487,15 @@ export function ImplementationPlanView({
             onLayerHover={(source, systemId) => setLayersBarHoverLayerId(`${source}\t${systemId}`)}
             onLayerHoverEnd={() => setLayersBarHoverLayerId(null)}
             onLayerActivate={onLayersBarLayerActivate}
+            allowMepLayerActivate={floor1Sheet.allowsMepEditing}
+            onAnnotationsLayerActivate={() => {
+              setPlaceMode('annotate')
+              setTraceOverlayEditMode(false)
+              if (planViewContext.kind === 'elevation') setAnnotationTool('groundLine')
+            }}
           />
         </div>
       )}
     </div>
   )
 }
-
-export { cloneSketch }

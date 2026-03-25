@@ -173,6 +173,51 @@ export function findRoomComponentForCellKey(
   return null
 }
 
+/** O(total cells) — use for hot paths (clicks, drags) instead of repeated `findRoomComponentForCellKey`. */
+export function buildPlanRoomCellKeyIndex(
+  rooms: readonly PlanRoomComponent[],
+): Map<string, { room: PlanRoomComponent; index: number }> {
+  const m = new Map<string, { room: PlanRoomComponent; index: number }>()
+  for (let ri = 0; ri < rooms.length; ri++) {
+    const room = rooms[ri]!
+    for (const k of room.cellKeys) m.set(k, { room, index: ri })
+  }
+  return m
+}
+
+/** Compare room labels without leading/trailing space; ignores ASCII case. */
+export function roomNamesEqualIgnoreCase(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase()
+}
+
+function sortRoomLabelsDeterministic(labels: string[]): void {
+  labels.sort(
+    (x, y) => x.localeCompare(y, undefined, { sensitivity: 'base' }) || x.localeCompare(y),
+  )
+}
+
+/** One display string per case-insensitive group (stable, prefers e.g. “Kitchen” over “kitchen” in ties). */
+function canonicalLabelAmongSpellings(spellings: readonly string[]): string {
+  const groups = new Map<string, string[]>()
+  for (const raw of spellings) {
+    const t = raw.trim()
+    if (!t) continue
+    const k = t.toLowerCase()
+    const g = groups.get(k) ?? []
+    if (!g.includes(t)) g.push(t)
+    groups.set(k, g)
+  }
+  const reps: string[] = []
+  for (const g of groups.values()) {
+    sortRoomLabelsDeterministic(g)
+    reps.push(g[0]!)
+  }
+  if (reps.length === 0) return ''
+  if (reps.length === 1) return reps[0]!
+  sortRoomLabelsDeterministic(reps)
+  return reps[0]!
+}
+
 /** True if any cell in the zone has a non-empty saved room name. */
 export function roomZoneHasAssignedName(
   cellKeys: readonly string[],
@@ -221,21 +266,48 @@ export function resolveRoomDisplayName(
 ): string {
   if (cellKeys.length === 0) return `Room ${fallbackIndex1}`
   if (!roomByCell) return `Room ${fallbackIndex1}`
-  const names = new Set<string>()
+  const spellings: string[] = []
   for (const ck of cellKeys) {
     const n = roomByCell[ck]?.trim()
-    if (n) names.add(n)
+    if (n) spellings.push(n)
   }
-  if (names.size === 1) return [...names][0]!
-  if (names.size > 1) return [...names].sort()[0]!
+  const resolved = canonicalLabelAmongSpellings(spellings)
+  if (resolved) return resolved
   return `Room ${fallbackIndex1}`
+}
+
+export type PhysicalSpaceInventoryRow = {
+  /** Stable key for custom inventory columns (sorted layout cell keys). */
+  rowId: string
+  name: string
+  /** Cell count × (grid spacing in)² ÷ 144. */
+  sqFt: number
+  cellCount: number
+}
+
+/** Enclosed zones from the layout sketch with display names and gross ft² per zone. */
+export function physicalSpaceInventoryRows(
+  sketch: PlanLayoutSketch,
+  d: BuildingDimensions,
+): PhysicalSpaceInventoryRow[] {
+  const rooms = listEnclosedPlanRooms(sketch, d)
+  const delta = sketch.gridSpacingIn
+  if (!(delta > 0) || rooms.length === 0) return []
+  const cellSqFt = (delta * delta) / 144
+  return rooms.map((room, i) => ({
+    rowId: [...room.cellKeys].sort().join('|'),
+    name: resolveRoomDisplayName(room.cellKeys, sketch.roomByCell, i + 1),
+    sqFt: room.cellKeys.length * cellSqFt,
+    cellCount: room.cellKeys.length,
+  }))
 }
 
 /** Distinct fill color from room label (FNV-1a hue). */
 export function planRoomFillColorForName(name: string, alpha = 0.36): string {
+  const key = name.trim().toLowerCase()
   let h = 2166136261 >>> 0
-  for (let i = 0; i < name.length; i++) {
-    h ^= name.charCodeAt(i)
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i)
     h = Math.imul(h, 16777619) >>> 0
   }
   const hue = h % 360

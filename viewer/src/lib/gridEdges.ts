@@ -106,6 +106,9 @@ export interface NearestEdgeHit extends GridEdgeKey {
 /**
  * Find nearest grid edge to point in plan inches within footprint.
  * maxDistIn: ignore edges farther than this (e.g. 6" tolerance in inch space scaled by zoom via caller).
+ *
+ * Only edges within `maxDistIn` can beat the current best; they lie in an O((maxDist/Δ)²) window
+ * around the pointer — not O(nx·ny) over the whole lot (critical for pointer-move hover).
  */
 export function nearestGridEdge(
   xIn: number,
@@ -116,28 +119,42 @@ export function nearestGridEdge(
   maxDistIn: number,
 ): NearestEdgeHit | null {
   const { nx, ny } = gridCounts(footprintWIn, footprintDIn, deltaIn)
-  const d = deltaIn
+  const d = Math.max(1e-6, deltaIn)
+  const md = Math.max(0, maxDistIn)
+  if (nx < 1 || ny < 1) return null
+
   let best: NearestEdgeHit | null = null
 
-  for (let j = 0; j <= ny; j++) {
+  const pad = 1
+  const jLoH = Math.max(0, Math.floor((yIn - md) / d) - pad)
+  const jHiH = Math.min(ny, Math.ceil((yIn + md) / d) + pad)
+  const iLoH = Math.max(0, Math.floor((xIn - md) / d) - pad)
+  const iHiH = Math.min(nx - 1, Math.ceil((xIn + md) / d) + pad)
+
+  for (let j = jLoH; j <= jHiH; j++) {
     const y = j * d
-    for (let i = 0; i < nx; i++) {
+    for (let i = iLoH; i <= iHiH; i++) {
       const x0 = i * d
       const x1 = (i + 1) * d
       const dist = distPointToSegment(xIn, yIn, x0, y, x1, y)
-      if (dist <= maxDistIn && (!best || dist < best.distIn)) {
+      if (dist <= md && (!best || dist < best.distIn)) {
         best = { axis: 'h', i, j, distIn: dist }
       }
     }
   }
 
-  for (let i = 0; i <= nx; i++) {
+  const iLoV = Math.max(0, Math.floor((xIn - md) / d) - pad)
+  const iHiV = Math.min(nx, Math.ceil((xIn + md) / d) + pad)
+  const jLoV = Math.max(0, Math.floor((yIn - md) / d) - pad)
+  const jHiV = Math.min(ny - 1, Math.ceil((yIn + md) / d) + pad)
+
+  for (let i = iLoV; i <= iHiV; i++) {
     const x = i * d
-    for (let j = 0; j < ny; j++) {
+    for (let j = jLoV; j <= jHiV; j++) {
       const y0 = j * d
       const y1 = (j + 1) * d
       const dist = distPointToSegment(xIn, yIn, x, y0, x, y1)
-      if (dist <= maxDistIn && (!best || dist < best.distIn)) {
+      if (dist <= md && (!best || dist < best.distIn)) {
         best = { axis: 'v', i, j, distIn: dist }
       }
     }
@@ -247,6 +264,16 @@ export function nodeUnderCursor(
   const cy = j * d
   if (Math.hypot(xIn - cx, yIn - cy) > maxDistIn) return null
   return { i, j }
+}
+
+/**
+ * Line-drag end snap: screen pick tolerance (plan inches) can shrink below half a cell when zoomed in,
+ * which makes `nodeUnderCursor` return null in the middle of cells and the preview feel like it lags.
+ * This floor keeps the nearest grid node resolvable everywhere inside the site grid.
+ */
+export function wallLineDragEndSnapDistIn(maxDistPickIn: number, gridDeltaIn: number): number {
+  const minHalfCell = gridDeltaIn * (Math.SQRT2 / 2 + 0.04)
+  return Math.max(maxDistPickIn * 1.2, minHalfCell)
 }
 
 /** Convert SVG px to plan inches using building dimensions. */

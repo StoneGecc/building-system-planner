@@ -18,6 +18,7 @@ import {
   type PlanSiteDisplayUnit,
 } from '../lib/planDisplayUnits'
 import {
+  PLAN_ANNOTATIONS_LAYER_ID,
   PLAN_ROOMS_LAYER_ID,
   PLAN_ROOMS_LAYER_SOURCE,
   PLAN_ROOMS_LAYER_SYSTEM_ID,
@@ -38,6 +39,10 @@ interface PlanSketchLayersBarProps {
   onLayerHover?: (source: ActiveCatalog, systemId: string) => void
   onLayerHoverEnd?: () => void
   onLayerActivate?: (source: ActiveCatalog, systemId: string) => void
+  /** Switch to Annotation mode (toolbar); optional. */
+  onAnnotationsLayerActivate?: () => void
+  /** When false, MEP layer chips do not switch the editor to MEP (e.g. Layout sheet). */
+  allowMepLayerActivate?: boolean
 }
 
 type Acc = {
@@ -74,6 +79,8 @@ export function PlanSketchLayersBar({
   onLayerHover,
   onLayerHoverEnd,
   onLayerActivate,
+  onAnnotationsLayerActivate,
+  allowMepLayerActivate = true,
 }: PlanSketchLayersBarProps) {
   const rows = useMemo(() => {
     const m = new Map<string, Acc>()
@@ -171,8 +178,14 @@ export function PlanSketchLayersBar({
   /** Match plan canvas: labels only appear when there is at least one enclosed zone. */
   const showRoomsLayer = enclosedRoomCount > 0
   const roomsSwatch = 'hsl(230, 22%, 42%)'
+  const nDim = sketch.measureRuns?.length ?? 0
+  const nGrid = sketch.annotationGridRuns?.length ?? 0
+  const nSec = sketch.annotationSectionCuts?.length ?? 0
+  const nLab = sketch.annotationLabels?.length ?? 0
+  const showAnnotationsLayer = nDim + nGrid + nSec + nLab > 0
+  const annotationsSwatch = '#64748b'
 
-  if (rows.length === 0 && !showRoomsLayer) {
+  if (rows.length === 0 && !showRoomsLayer && !showAnnotationsLayer) {
     return (
       <div className="shrink-0 border-t border-border/60 bg-transparent px-3 py-2">
         <p className="font-mono text-[9px] text-muted-foreground tracking-wide">
@@ -217,24 +230,31 @@ export function PlanSketchLayersBar({
           }
           const rowIdentity = `${r.source}\t${r.systemId}`
           const isActiveRow = activeLayerIdentity === rowIdentity
+          const mepActivateBlocked = r.source === 'mep' && !allowMepLayerActivate
           return (
             <div
               key={`${r.source}:${r.systemId}`}
               role="button"
               tabIndex={0}
               className={cn(
-                'flex shrink-0 items-center gap-2 rounded-md border px-2 py-1 w-[min(18rem,calc(100vw-6rem))] min-w-[11rem] cursor-pointer transition-colors',
-                'border-border/80 bg-muted/10 hover:bg-muted/25',
+                'flex shrink-0 items-center gap-2 rounded-md border px-2 py-1 w-[min(18rem,calc(100vw-6rem))] min-w-[11rem] transition-colors',
+                mepActivateBlocked
+                  ? 'cursor-not-allowed opacity-60 border-border/60 bg-muted/5'
+                  : 'cursor-pointer border-border/80 bg-muted/10 hover:bg-muted/25',
                 isActiveRow && 'border-foreground/60 bg-muted/35 ring-1 ring-foreground/25',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
               )}
-              title={r.label}
+              title={mepActivateBlocked ? `${r.label} — open a trade sheet to edit MEP` : r.label}
               onMouseEnter={() => onLayerHover?.(r.source, r.systemId)}
               onMouseLeave={() => onLayerHoverEnd?.()}
-              onClick={() => onLayerActivate?.(r.source, r.systemId)}
+              onClick={() => {
+                if (mepActivateBlocked) return
+                onLayerActivate?.(r.source, r.systemId)
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault()
+                  if (mepActivateBlocked) return
                   onLayerActivate?.(r.source, r.systemId)
                 }
               }}
@@ -313,6 +333,50 @@ export function PlanSketchLayersBar({
             </div>
           )
         })}
+        {showAnnotationsLayer && (
+          <div
+            key="plan-annotations-layer"
+            role="button"
+            tabIndex={0}
+            className={cn(
+              'flex shrink-0 items-center gap-2 rounded-md border px-2 py-1 w-[min(18rem,calc(100vw-6rem))] min-w-[11rem] cursor-pointer transition-colors',
+              'border-border/80 bg-muted/10 hover:bg-muted/25',
+              activeLayerIdentity === PLAN_ANNOTATIONS_LAYER_ID &&
+                'border-foreground/60 bg-muted/35 ring-1 ring-foreground/25',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
+            )}
+            title="Annotations: dimensions, grid lines, section cuts, text — click to open Annotation tools"
+            onMouseLeave={() => onLayerHoverEnd?.()}
+            onClick={() => onAnnotationsLayerActivate?.()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onAnnotationsLayerActivate?.()
+              }
+            }}
+          >
+            <div className="flex flex-wrap gap-0.5 shrink-0 items-center content-center max-w-[2rem]">
+              <span
+                className="block h-2.5 w-2.5 rounded-sm border border-black/15 shrink-0"
+                style={{ backgroundColor: annotationsSwatch, opacity: 0.75 }}
+                title="Annotation stroke"
+              />
+            </div>
+            <div className="min-w-0 flex-1 overflow-hidden">
+              <div className="font-mono text-[9px] text-foreground leading-tight truncate">Annotations</div>
+              <div className="font-mono text-[8px] text-muted-foreground leading-tight truncate">
+                {[
+                  nDim ? `${nDim} dimension run${nDim === 1 ? '' : 's'}` : null,
+                  nGrid ? `${nGrid} grid ref${nGrid === 1 ? '' : 's'}` : null,
+                  nSec ? `${nSec} section cut${nSec === 1 ? '' : 's'}` : null,
+                  nLab ? `${nLab} label${nLab === 1 ? '' : 's'}` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </div>
+            </div>
+          </div>
+        )}
         {showRoomsLayer && (
           <div
             key="plan-rooms-layer"
