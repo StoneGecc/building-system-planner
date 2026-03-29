@@ -8,7 +8,7 @@ from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CSV_PATH = ROOT / "Building_Systems_Complete.csv"
+CSV_PATH = ROOT / "viewer" / "public" / "Building_Systems_Complete.csv"
 
 NEW_HEADER = [
     "System_ID", "System_Type", "Location", "Stack_Direction", "System_Name", "Category",

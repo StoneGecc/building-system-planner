@@ -290,7 +290,7 @@ function PlanSystemZones({ SYSTEM_PLACEMENTS, hoveredSystemId, onHoverSystem }: 
             >
               <rect
                 x={z.x} y={z.y} width={z.w} height={z.h}
-                fill={`url(#${p.hatchId})`}
+                fill={p.fillColor}
                 stroke="black"
                 strokeWidth={isAirGap ? 0.7 : 0.8}
                 strokeDasharray={isAirGap ? '4,2' : undefined}

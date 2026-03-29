@@ -4,7 +4,7 @@ import csv
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CSV_PATH = ROOT / "Building_Systems_Complete.csv"
+CSV_PATH = ROOT / "viewer" / "public" / "Building_Systems_Complete.csv"
 
 EXTRA = [
     "Config_Key",

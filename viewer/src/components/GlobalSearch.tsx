@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SystemData } from '../types/system'
+import type { BuildingLevel } from '../types/planLayout'
+import type { PlanConnection } from '../lib/planConnections'
 import { buildSearchHits, filterSearchHits, type SearchHit } from '../lib/searchIndex'
 import { cn } from '../lib/utils'
 
@@ -8,15 +10,27 @@ export interface GlobalSearchProps {
   onClose: () => void
   orderedSystems: SystemData[]
   onNavigate: (pageIndex: number, options?: { layerIndex?: number; openBulkEdit?: boolean }) => void
+  buildingLevels?: BuildingLevel[]
+  planConnections?: readonly PlanConnection[]
 }
 
-export function GlobalSearch({ open, onClose, orderedSystems, onNavigate }: GlobalSearchProps) {
+export function GlobalSearch({
+  open,
+  onClose,
+  orderedSystems,
+  onNavigate,
+  buildingLevels,
+  planConnections,
+}: GlobalSearchProps) {
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
-  const hits = useMemo(() => buildSearchHits(orderedSystems), [orderedSystems])
+  const hits = useMemo(
+    () => buildSearchHits(orderedSystems, buildingLevels, planConnections),
+    [orderedSystems, buildingLevels, planConnections],
+  )
   const filtered = useMemo(() => filterSearchHits(hits, query), [hits, query])
 
   useEffect(() => {

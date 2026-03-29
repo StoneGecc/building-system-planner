@@ -24,5 +24,23 @@ export function cloneSketch(s: PlanLayoutSketch): PlanLayoutSketch {
     roomBoundaryEdges: s.roomBoundaryEdges?.map((e) => ({ ...e })),
     roomByCell: s.roomByCell ? { ...s.roomByCell } : undefined,
     elevationLevelLines: s.elevationLevelLines?.map((l) => ({ ...l })),
+    connectionDetailStripLayerFlips: s.connectionDetailStripLayerFlips
+      ? { ...s.connectionDetailStripLayerFlips }
+      : undefined,
+    connectionJunctionConvexConcaveByNode: s.connectionJunctionConvexConcaveByNode
+      ? { ...s.connectionJunctionConvexConcaveByNode }
+      : undefined,
+    connectionDetailHomogeneousLVariantIdsByFamily: s.connectionDetailHomogeneousLVariantIdsByFamily
+      ? Object.fromEntries(
+          Object.entries(s.connectionDetailHomogeneousLVariantIdsByFamily).map(([k, v]) => [k, [...v]]),
+        )
+      : undefined,
+    connectionJunctionHomogeneousLSketchIdByNode: s.connectionJunctionHomogeneousLSketchIdByNode
+      ? { ...s.connectionJunctionHomogeneousLSketchIdByNode }
+      : undefined,
+    planArchEdgeLayerFlipped: s.planArchEdgeLayerFlipped ? { ...s.planArchEdgeLayerFlipped } : undefined,
+    connectionDetailLayerFillByCell: s.connectionDetailLayerFillByCell
+      ? { ...s.connectionDetailLayerFillByCell }
+      : undefined,
   }
 }

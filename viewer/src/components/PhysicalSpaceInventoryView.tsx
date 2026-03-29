@@ -182,9 +182,9 @@ export function PhysicalSpaceInventoryView({
             Physical space inventory
           </h1>
           <p className="font-mono text-[10px] text-muted-foreground mt-1 leading-relaxed">
-            Floor 1 enclosed rooms from the Layout sketch. Area = grid cells × ({delta.toFixed(2)} in)² per cell
-            (ft²). Use Add column to add custom fields; removing a column opens a confirmation step. Data is saved
-            for this building footprint.
+            Named rooms from the Level 1 Layout sketch (Fill or Auto-fill on the Room layer). Area = grid cells ×
+            ({delta.toFixed(2)} in)² per cell (ft²). Use Add column for custom fields; removing a column asks for
+            confirmation. Data is saved for this building footprint.
           </p>
         </div>
 
@@ -251,8 +251,8 @@ export function PhysicalSpaceInventoryView({
               {rows.length === 0 ? (
                 <tr>
                   <td colSpan={colSpanEmpty} className="px-3 py-8 text-center text-muted-foreground leading-relaxed">
-                    No enclosed rooms yet. On Floor 1 → Layout, draw walls and room boundaries so each space is
-                    fully bounded; names come from the Room layer or default to Room 1, Room 2, …
+                    No named rooms yet. On Level 1 → Layout, bound spaces with walls and/or room boundaries, then use
+                    Room → Fill (or Auto-fill) to assign names. Only named zones appear here.
                   </td>
                 </tr>
               ) : (

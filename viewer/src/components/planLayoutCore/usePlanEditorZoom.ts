@@ -1,10 +1,12 @@
 import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { clampZoom } from './planEditorGeometry'
+import { ZOOM_MAX } from './constants'
 import type { ZoomAnchorCommit } from './types'
 
 export function usePlanEditorZoom(
   scrollRef: RefObject<HTMLDivElement | null>,
   planBoxRef: RefObject<HTMLDivElement | null>,
+  zoomMax: number = ZOOM_MAX,
 ) {
   const zoomCommitRef = useRef<ZoomAnchorCommit | null>(null)
   const [zoom, setZoom] = useState(1)
@@ -13,7 +15,7 @@ export function usePlanEditorZoom(
 
   const applyZoom = useCallback((targetZoom: number, anchor?: { clientX: number; clientY: number }) => {
     setZoom((z0) => {
-      const z1 = clampZoom(targetZoom)
+      const z1 = clampZoom(targetZoom, zoomMax)
       if (Math.abs(z1 - z0) < 1e-9) {
         zoomCommitRef.current = null
         return z0
@@ -36,7 +38,7 @@ export function usePlanEditorZoom(
       }
       return z1
     })
-  }, [scrollRef, planBoxRef])
+  }, [scrollRef, planBoxRef, zoomMax])
 
   const applyZoomRef = useRef(applyZoom)
   applyZoomRef.current = applyZoom

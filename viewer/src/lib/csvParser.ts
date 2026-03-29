@@ -17,6 +17,7 @@ import {
 import type { DiagramDetailLevel } from '../types/system'
 import { DEFAULT_LAYOUT_REFS } from '../data/schematicFrame'
 import { splitCsvLine } from './csvSplit'
+import { isHex6 } from './layerDiagramFill'
 
 const VALID_LAYER_TYPES = new Set<LayerType>([
   'CLT', 'WOOD', 'INSULATION', 'MEMBRANE', 'METAL',
@@ -194,6 +195,8 @@ export function parseCSV(raw: string): ParseResult {
   const sheetOrderCol = col('Sheet_Order')
   const diagramLabelCol = col('Diagram_Label')
   const diagramHatchCol = col('Diagram_Hatch')
+  const diagramColorCol = col('Diagram_Color')
+  const planColorCol = col('Plan_Color')
   const secJsonCol = col('Diagram_Section_Zones_JSON')
   const planJsonCol = col('Diagram_Plan_Zones_JSON')
   const voCol = col('View_Orientation')
@@ -212,6 +215,11 @@ export function parseCSV(raw: string): ParseResult {
   const esCol = col('Element_Spacing_OC_in')
   const cavCol = col('Cavity_Depth_in')
   const cjCol = col('Control_Joint_Spacing_ft')
+  const pdwCol = col('Plan_Draw_Width_in')
+  const pelCol = col('Plan_Equip_Length_in')
+  const pewCol = col('Plan_Equip_Width_in')
+  const pedCol = col('Plan_Equip_Depth_in')
+  const layerColorCol = col('Layer_Color')
 
   for (const [sysId, rows] of systemMap) {
     if (sysId === 'BLD') continue
@@ -256,6 +264,10 @@ export function parseCSV(raw: string): ParseResult {
       sheetOrderCol >= 0 ? parseInt((meta[sheetOrderCol] ?? '').trim(), 10) : NaN
     const diagramLabel = diagramLabelCol >= 0 ? (meta[diagramLabelCol] ?? '').trim() || undefined : undefined
     const diagramHatch = diagramHatchCol >= 0 ? (meta[diagramHatchCol] ?? '').trim() || undefined : undefined
+    const diagramColorRaw = diagramColorCol >= 0 ? (meta[diagramColorCol] ?? '').trim() : ''
+    const diagramColorHex = isHex6(diagramColorRaw) ? diagramColorRaw.toLowerCase() : undefined
+    const planColorRaw = planColorCol >= 0 ? (meta[planColorCol] ?? '').trim() : ''
+    const planColorHex = isHex6(planColorRaw) ? planColorRaw.toLowerCase() : undefined
     const diagramSectionZonesJson = secJsonCol >= 0 ? (meta[secJsonCol] ?? '').trim() || undefined : undefined
     const diagramPlanZonesJson = planJsonCol >= 0 ? (meta[planJsonCol] ?? '').trim() || undefined : undefined
 
@@ -271,6 +283,10 @@ export function parseCSV(raw: string): ParseResult {
     const diagramDetailLevelRaw =
       diagramDetailLevelCol >= 0 ? (meta[diagramDetailLevelCol] ?? '').trim() : ''
     const diagramDetailLevelParsed = parseDiagramDetailLevel(diagramDetailLevelRaw)
+    const planDrawWidthIn = pdwCol >= 0 ? parseThickness((meta[pdwCol] ?? '').trim()) : 0
+    const planEquipLengthIn = pelCol >= 0 ? parseThickness((meta[pelCol] ?? '').trim()) : 0
+    const planEquipWidthIn = pewCol >= 0 ? parseThickness((meta[pewCol] ?? '').trim()) : 0
+    const planEquipDepthIn = pedCol >= 0 ? parseThickness((meta[pedCol] ?? '').trim()) : 0
 
     const layers: Layer[] = []
     let totalThickness = '—'
@@ -291,8 +307,15 @@ export function parseCSV(raw: string): ParseResult {
         ? (rawType as LayerType)
         : 'MISC'
 
+      const rawLayerColor = layerColorCol >= 0 ? (row[layerColorCol] ?? '').trim() : ''
       const rawFill = (row[idx('Fill')] ?? '').trim()
-      const fill = rawFill && VALID_FILLS.has(rawFill) ? rawFill : undefined
+      const colorHex =
+        isHex6(rawLayerColor)
+          ? rawLayerColor.toLowerCase()
+          : isHex6(rawFill)
+            ? rawFill.toLowerCase()
+            : undefined
+      const fill = rawFill && VALID_FILLS.has(rawFill) && !isHex6(rawFill) ? rawFill : undefined
       const fastenerIconCol = idx('Fastener_Icon')
       const rawFi = fastenerIconCol >= 0 ? row[fastenerIconCol]?.trim() ?? '' : ''
       const fastenerIcon =
@@ -337,6 +360,7 @@ export function parseCSV(raw: string): ParseResult {
         ...(detailMinFeaturePx !== undefined ? { detailMinFeaturePx } : {}),
         layerType,
         fill,
+        ...(colorHex ? { colorHex } : {}),
         notes: row[idx('Drawing_Note')] ?? '',
         visible: true,
       })
@@ -353,6 +377,8 @@ export function parseCSV(raw: string): ParseResult {
       ...(Number.isFinite(sheetOrder) ? { sheetOrder } : {}),
       ...(diagramLabel ? { diagramLabel } : {}),
       ...(diagramHatch ? { diagramHatch } : {}),
+      ...(diagramColorHex ? { diagramColorHex } : {}),
+      ...(planColorHex ? { planColorHex } : {}),
       ...(diagramSectionZonesJson ? { diagramSectionZonesJson } : {}),
       ...(diagramPlanZonesJson ? { diagramPlanZonesJson } : {}),
       ...(viewOrientation ? { viewOrientation } : {}),
@@ -360,6 +386,10 @@ export function parseCSV(raw: string): ParseResult {
       ...(viewTopLabel ? { viewTopLabel } : {}),
       ...(viewBottomLabel ? { viewBottomLabel } : {}),
       ...(diagramDetailLevelParsed !== undefined ? { diagramDetailLevel: diagramDetailLevelParsed } : {}),
+      ...(planDrawWidthIn > 0 ? { planDrawWidthIn } : {}),
+      ...(planEquipLengthIn > 0 ? { planEquipLengthIn } : {}),
+      ...(planEquipWidthIn > 0 ? { planEquipWidthIn } : {}),
+      ...(planEquipDepthIn > 0 ? { planEquipDepthIn } : {}),
     })
   }
 

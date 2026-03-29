@@ -7,7 +7,7 @@ CSV-driven viewer and tooling for building-system assemblies (plans, sections, e
 
 ## Data
 
-- **`Building_Systems_Complete.csv`** — project dataset at the repo root.
+- **`viewer/public/Building_Systems_Complete.csv`** — project dataset (served with the viewer; bundled via Vite raw import).
 - **`viewer/fixtures/minimal_building_systems.csv`** — small fixture for smoke tests.
 - Schema and column contract: **[docs/CSV_SCHEMA.md](docs/CSV_SCHEMA.md)**.
 

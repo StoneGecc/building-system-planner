@@ -39,7 +39,7 @@ const DISCIPLINE_BANDS: DisciplineDef[][] = [
   [
     { code: 'D', label: 'Process' },
     { code: 'Q', label: 'Equipment' },
-    { code: 'W', label: 'Distributed Energy' },
+    { code: 'W', label: 'Water' },
     { code: 'O', label: 'Operations' },
   ],
   [{ code: 'I', label: 'Interiors (Consultant)' }],
@@ -114,4 +114,11 @@ export function getDisciplineFromSystemId(systemId: string): string {
   if (first === 'F') return 'FP'
   if (DISCIPLINES.some((d) => d.code === first)) return first
   return 'X'
+}
+
+/** Discipline codes that use MEP plan tools (runs, devices). Must stay in sync with `deriveMepItemsFromSystems`. */
+export const MEP_PLAN_DISCIPLINE_CODES: ReadonlySet<string> = new Set(['M', 'E', 'P', 'FP', 'T', 'W'])
+
+export function isMepPlanDisciplineSystem(systemId: string): boolean {
+  return MEP_PLAN_DISCIPLINE_CODES.has(getDisciplineFromSystemId(systemId))
 }

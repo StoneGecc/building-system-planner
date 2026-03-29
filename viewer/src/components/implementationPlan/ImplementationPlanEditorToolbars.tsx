@@ -1,10 +1,17 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PlanLayoutSketch, PlanTraceOverlay } from '../../types/planLayout'
+import { DEFAULT_LEVEL_PRESETS } from '../../types/planLayout'
 import type { BuildingDimensions } from '../../types/system'
 import type { AnnotationTool, FloorTool, LayoutTool, RoomTool } from '../PlanLayoutEditor'
 import { PlanSystemPicker, type PaintSystemOption } from '../PlanSystemPicker'
 import { ToolbarGroup } from '../ToolbarGroup'
 import type { PlanColorCatalog, PlanPlaceMode } from '../../lib/planLayerColors'
+import {
+  parseLinearMeasureToPlanInches,
+  parseOptionalLinearToPlanInches,
+  PLAN_SITE_UNIT_SHORT,
+  type PlanSiteDisplayUnit,
+} from '../../lib/planDisplayUnits'
 import {
   listEnclosedPlanRooms,
   planRoomFillColorForName,
@@ -12,7 +19,13 @@ import {
   roomZoneHasAssignedName,
 } from '../../lib/planRooms'
 import { cn } from '../../lib/utils'
+import { isMepRunMode, isMepPointMode, isMepDisciplineMode } from '../../types/planPlaceMode'
+import { PLACE_MODE_LABELS } from '../../data/floor1Sheets'
 import type { ImplementationPlanViewContext } from './viewContext'
+import {
+  CONNECTION_DETAIL_FILL_CLEAR_VALUE,
+  type ConnectionDetailFillLayerOptionRow,
+} from '../../lib/connectionDetailFillLayerOptions'
 
 type NamedRoomJumpRow = {
   cellKeys: string[]
@@ -22,6 +35,126 @@ type NamedRoomJumpRow = {
 
 function planRoomZoneKey(cellKeys: readonly string[]): string {
   return [...cellKeys].sort().join('|')
+}
+
+/** Same chrome as {@link NamedRoomJumpPicker} — layer/MEP swatches from catalog fills (incl. rgba). */
+function ConnectionDetailFillLayerPicker({
+  rows,
+  value,
+  onChange,
+}: {
+  rows: readonly ConnectionDetailFillLayerOptionRow[]
+  value: string
+  onChange: (next: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const optionBtnRefs = useRef<Map<string, HTMLButtonElement>>(new Map())
+
+  const current = useMemo(
+    () => rows.find((r) => r.value === value) ?? rows[0],
+    [rows, value],
+  )
+
+  useLayoutEffect(() => {
+    if (!open || !value) return
+    const id = requestAnimationFrame(() => {
+      optionBtnRefs.current.get(value)?.scrollIntoView({
+        block: 'center',
+        inline: 'nearest',
+        behavior: 'auto',
+      })
+    })
+    return () => cancelAnimationFrame(id)
+  }, [open, value, rows])
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: PointerEvent) => {
+      if (wrapRef.current?.contains(e.target as Node)) return
+      setOpen(false)
+    }
+    document.addEventListener('pointerdown', onDoc, true)
+    return () => document.removeEventListener('pointerdown', onDoc, true)
+  }, [open])
+
+  const isClear = current?.value === CONNECTION_DETAIL_FILL_CLEAR_VALUE
+
+  return (
+    <div ref={wrapRef} className="relative w-full min-w-0">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label={current ? `Layer fill: ${current.label}` : 'Choose layer fill'}
+        title="Pick a catalog layer (or Clear), then hover the plan for preview and click to apply"
+        onClick={() => setOpen((x) => !x)}
+        className="w-full min-w-0 flex items-center gap-2 border border-border px-1.5 py-1 font-mono text-[9px] bg-white hover:bg-muted/40 rounded-sm text-left"
+      >
+        <span
+          className={cn(
+            'h-2.5 w-2.5 rounded-sm border shrink-0',
+            isClear ? 'border-border bg-muted/60' : 'border-black/25',
+          )}
+          style={
+            !isClear && current?.fillPreview
+              ? { backgroundColor: current.fillPreview }
+              : undefined
+          }
+          aria-hidden
+        />
+        <span className="flex min-w-0 flex-1 truncate">
+          {current?.label ?? 'Layer fill…'}
+        </span>
+        <span className="text-muted-foreground shrink-0 text-[8px] leading-none pt-px">{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <ul
+          role="listbox"
+          className="absolute left-0 right-0 top-full z-50 mt-1 max-h-56 overflow-auto rounded-sm border border-border bg-white py-0.5 shadow-md"
+        >
+          {rows.map((row, rowIdx) => {
+            const selected = row.value === value
+            const rowIsClear = row.value === CONNECTION_DETAIL_FILL_CLEAR_VALUE
+            return (
+              <li key={row.value} role="none">
+                <button
+                  id={selected ? `cdf-fill-${rowIdx}` : undefined}
+                  type="button"
+                  role="option"
+                  aria-selected={selected}
+                  ref={(el) => {
+                    if (el) optionBtnRefs.current.set(row.value, el)
+                    else optionBtnRefs.current.delete(row.value)
+                  }}
+                  className={cn(
+                    'flex w-full min-w-0 items-center gap-2 px-2 py-1.5 text-left font-mono text-[9px] hover:bg-zinc-100',
+                    selected && 'bg-zinc-100',
+                  )}
+                  onClick={() => {
+                    onChange(row.value)
+                    setOpen(false)
+                  }}
+                >
+                  <span
+                    className={cn(
+                      'h-2.5 w-2.5 rounded-sm shrink-0 border',
+                      rowIsClear ? 'border-border bg-muted/60' : 'border-black/25',
+                    )}
+                    style={
+                      !rowIsClear ? { backgroundColor: row.fillPreview } : undefined
+                    }
+                    aria-hidden
+                  />
+                  <span className="truncate min-w-0">{row.label}</span>
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
+  )
 }
 
 /** Same chrome as `PlanSystemPicker` — button trigger + floating listbox. */
@@ -138,6 +271,11 @@ const btnBase = 'font-mono text-[8px] px-2 py-0.5 border uppercase tracking-wide
 const btnIdle = `${btnBase} border-border hover:bg-muted`
 const btnOn = `${btnBase} border-foreground bg-foreground text-white`
 
+/** Shown next to the system picker when plan edges/columns are selected (Select tool). */
+export type PlanToolbarOffsetSpec =
+  | { kind: 'edge'; applyPerp: (perpIn: number) => void; clear: () => void }
+  | { kind: 'column'; apply: (dxIn: number, dyIn: number) => void; clear: () => void }
+
 function floatingToolbarTitle(
   traceOverlayEditMode: boolean,
   placeMode: PlanPlaceMode,
@@ -145,6 +283,7 @@ function floatingToolbarTitle(
   roomTool: RoomTool,
   floorTool: FloorTool,
   structureTool: LayoutTool,
+  connectionDetailAnnotate: boolean,
 ): string {
   if (traceOverlayEditMode) return 'Drawing paused'
   if (placeMode === 'annotate') {
@@ -153,8 +292,14 @@ function floatingToolbarTitle(
     if (annotationTool === 'measureLine') return 'Annotation · Measure line'
     if (annotationTool === 'gridLine') return 'Annotation · Grid line'
     if (annotationTool === 'textLabel') return 'Annotation · Text'
+    if (annotationTool === 'sectionCut' && connectionDetailAnnotate) return 'Connection · Detail line'
     if (annotationTool === 'sectionCut') return 'Annotation · Section'
+    if (annotationTool === 'flipConnectionStripLayers') return 'Connection · Flip layers'
+    if (annotationTool === 'connectionDetailLayerFill' && connectionDetailAnnotate)
+      return 'Connection · Layer fill'
+    if (annotationTool === 'select' && connectionDetailAnnotate) return 'Connection · Select'
     if (annotationTool === 'select') return 'Annotation · Select'
+    if (annotationTool === 'erase' && connectionDetailAnnotate) return 'Connection · Erase'
     return 'Annotation · Erase'
   }
   if (placeMode === 'room') {
@@ -166,10 +311,31 @@ function floatingToolbarTitle(
     return 'Room · Select'
   }
   if (placeMode === 'column') {
-    return floorTool === 'erase' ? 'Columns · Erase' : 'Columns · Paint'
+    if (floorTool === 'erase') return 'Columns · Erase'
+    if (floorTool === 'flipAssembly') return 'Columns · Flip layers'
+    return 'Columns · Paint'
   }
-  if (placeMode === 'floor' || placeMode === 'stairs') return 'Paint with'
+  const modeLabel = PLACE_MODE_LABELS[placeMode]
+  if (isMepRunMode(placeMode) && modeLabel) {
+    const toolLabel =
+      structureTool === 'rect'
+        ? 'Rect'
+        : structureTool === 'erase'
+          ? 'Erase'
+          : structureTool === 'select'
+            ? 'Select'
+            : structureTool === 'flipAssembly'
+              ? 'Flip'
+              : 'Line'
+    return `${modeLabel} · ${toolLabel}`
+  }
+  if (isMepPointMode(placeMode) && modeLabel) {
+    const toolLabel = floorTool === 'erase' ? 'Erase' : floorTool === 'select' ? 'Select' : 'Place'
+    return `${modeLabel} · ${toolLabel}`
+  }
+  if (placeMode === 'floor' || placeMode === 'stairs' || placeMode === 'roof') return 'Paint with'
   if (structureTool === 'rect') return 'Rectangle with'
+  if (structureTool === 'flipAssembly') return 'Flip assembly layers with'
   return 'Line with'
 }
 
@@ -203,6 +369,90 @@ export type ImplementationPlanFloatingToolbarProps = {
   selectValue: string
   planColorCatalog: PlanColorCatalog
   onSelectSystem: (raw: string) => void
+  /** Floor-1 connection-detail sheet: custom annotate title/hint for detail line tool. */
+  connectionDetailAnnotate?: boolean
+  /** Connection-detail Layer fill: catalog rows + current value (toolbar dropdown). */
+  connectionDetailFillLayerRows?: readonly ConnectionDetailFillLayerOptionRow[]
+  connectionDetailFillPickKey?: string
+  onConnectionDetailFillPickKeyChange?: (value: string) => void
+  /** Select-tool selection: offset controls next to the system picker. */
+  planToolbarOffset?: PlanToolbarOffsetSpec | null
+  /** Default unit for offset fields (matches Setup site unit); user can change per session in the offset panel. */
+  offsetMeasureUnitDefault: PlanSiteDisplayUnit
+}
+
+function LevelLineDropdown({
+  value,
+  onChange,
+  placedLabels,
+}: {
+  value: string
+  onChange: (v: string) => void
+  placedLabels: string[]
+}) {
+  const [customMode, setCustomMode] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const handleSelect = useCallback(
+    (e: React.ChangeEvent<HTMLSelectElement>) => {
+      const v = e.target.value
+      if (v === '__custom__') {
+        setCustomMode(true)
+        onChange('')
+        requestAnimationFrame(() => inputRef.current?.focus())
+      } else {
+        setCustomMode(false)
+        onChange(v)
+      }
+    },
+    [onChange],
+  )
+
+  const placedSet = useMemo(() => new Set(placedLabels.filter(Boolean)), [placedLabels])
+
+  if (customMode) {
+    return (
+      <div className="w-full min-w-0 flex gap-1">
+        <input
+          ref={inputRef}
+          type="text"
+          value={value}
+          onChange={(ev) => onChange(ev.target.value)}
+          placeholder="Custom level name"
+          className="flex-1 border border-border px-2 py-1.5 font-mono text-[11px] text-foreground bg-white rounded-sm"
+          aria-label="Custom level name"
+        />
+        <button
+          type="button"
+          onClick={() => { setCustomMode(false); onChange(DEFAULT_LEVEL_PRESETS[0] ?? '') }}
+          className="shrink-0 px-1.5 py-1 border border-border text-[9px] font-mono text-muted-foreground hover:text-foreground rounded-sm"
+          title="Back to preset list"
+        >
+          &larr;
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="w-full min-w-0">
+      <select
+        value={value}
+        onChange={handleSelect}
+        className="w-full border border-border px-2 py-1.5 font-mono text-[11px] text-foreground bg-white rounded-sm"
+        aria-label="Level line label"
+        title="Select a level, then click a grid row to place it. Click the same row to remove."
+      >
+        {DEFAULT_LEVEL_PRESETS.map((preset) => (
+          <option key={preset} value={preset}>
+            {preset}{placedSet.has(preset) ? ' ✓' : ''}
+          </option>
+        ))}
+        <option disabled>────────</option>
+        <option value="__custom__">Add custom level…</option>
+      </select>
+    </div>
+  )
 }
 
 export function ImplementationPlanFloatingToolbar(props: ImplementationPlanFloatingToolbarProps) {
@@ -213,7 +463,6 @@ export function ImplementationPlanFloatingToolbar(props: ImplementationPlanFloat
     roomTool,
     floorTool,
     structureTool,
-    planViewContext,
     levelLineLabelDraft,
     setLevelLineLabelDraft,
     annotationLabelDraft,
@@ -234,7 +483,46 @@ export function ImplementationPlanFloatingToolbar(props: ImplementationPlanFloat
     selectValue,
     planColorCatalog,
     onSelectSystem,
+    connectionDetailAnnotate = false,
+    connectionDetailFillLayerRows = [],
+    connectionDetailFillPickKey = '',
+    onConnectionDetailFillPickKeyChange,
+    planToolbarOffset = null,
+    offsetMeasureUnitDefault,
   } = props
+
+  const [planOffsetOpen, setPlanOffsetOpen] = useState(false)
+  const [planOffsetEdgeDraft, setPlanOffsetEdgeDraft] = useState('')
+  const [planOffsetColX, setPlanOffsetColX] = useState('')
+  const [planOffsetColY, setPlanOffsetColY] = useState('')
+  const [offsetMeasureUnit, setOffsetMeasureUnit] = useState<PlanSiteDisplayUnit>(offsetMeasureUnitDefault)
+
+  useEffect(() => {
+    if (!planToolbarOffset) setPlanOffsetOpen(false)
+  }, [planToolbarOffset])
+
+  useEffect(() => {
+    setOffsetMeasureUnit(offsetMeasureUnitDefault)
+  }, [offsetMeasureUnitDefault])
+
+  const OFFSET_PARSE_HINT =
+    'Use decimals, fractions (3/4, 3 1/2, 3-1/2), or a suffix: in, ft, yd, mm, m, or " for inches.'
+
+  const offsetUnitSelect = (
+    <select
+      aria-label="Unit for offset distances"
+      value={offsetMeasureUnit}
+      onChange={(ev) => setOffsetMeasureUnit(ev.target.value as PlanSiteDisplayUnit)}
+      className="shrink-0 border border-border px-1 py-0.5 font-mono text-[9px] bg-white rounded-sm"
+      title={`Values are converted to plan inches. Suffix on a field overrides this (${OFFSET_PARSE_HINT})`}
+    >
+      {(['in', 'ft', 'yd', 'mm', 'm'] as const).map((u) => (
+        <option key={u} value={u}>
+          {PLAN_SITE_UNIT_SHORT[u]}
+        </option>
+      ))}
+    </select>
+  )
 
   const title = floatingToolbarTitle(
     traceOverlayEditMode,
@@ -243,6 +531,7 @@ export function ImplementationPlanFloatingToolbar(props: ImplementationPlanFloat
     roomTool,
     floorTool,
     structureTool,
+    connectionDetailAnnotate,
   )
 
   const namedRoomPickerRows = useMemo(() => {
@@ -279,46 +568,80 @@ export function ImplementationPlanFloatingToolbar(props: ImplementationPlanFloat
     })
   }, [roomPickerSketch, buildingDimensions])
 
+  const floatingToolbarHint = useMemo((): string | undefined => {
+    if (traceOverlayEditMode) {
+      const returnTo = placeMode === 'annotate'
+        ? 'annotations'
+        : placeMode === 'floor' || placeMode === 'stairs' || placeMode === 'roof'
+          ? 'cell paint'
+          : placeMode === 'column'
+            ? 'columns'
+            : placeMode === 'room'
+              ? 'room naming'
+              : isMepDisciplineMode(placeMode)
+                ? (PLACE_MODE_LABELS[placeMode]?.toLowerCase() ?? 'MEP tools')
+                : 'walls and lines'
+      return `Layer tools are paused while you adjust the trace. Press Done in the bottom trace panel to return to ${returnTo}.`
+    }
+    if (placeMode === 'annotate' && annotationTool === 'groundLine') {
+      return 'Click a grid row for a full-width ground line; another row moves it. Delete in the zoom bar clears it while this tool is active.'
+    }
+    if (
+      placeMode === 'annotate' &&
+      annotationTool === 'sectionCut' &&
+      connectionDetailAnnotate
+    ) {
+      return 'Drag from one grid intersection to another; diagonal segments are allowed. Use Erase to remove one grid segment at a time along the line.'
+    }
+    if (placeMode === 'annotate' && annotationTool === 'erase' && connectionDetailAnnotate) {
+      return 'Tiny drag on a highlighted grid segment removes that step of the detail line (same idea as wall segment erase).'
+    }
+    if (placeMode === 'annotate' && annotationTool === 'select' && connectionDetailAnnotate) {
+      return 'Click or box-select individual grid segments along a detail line (not the whole polyline); Shift adds or removes; Delete removes selected segments (splits lines like Erase).'
+    }
+    if (placeMode === 'annotate' && annotationTool === 'flipConnectionStripLayers' && connectionDetailAnnotate) {
+      return 'Click a junction wall strip or MEP band to reverse catalog layer order for that direction only; click again to restore. Saved on this connection sheet.'
+    }
+    if (
+      placeMode === 'annotate' &&
+      annotationTool === 'connectionDetailLayerFill' &&
+      connectionDetailAnnotate
+    ) {
+      return 'Choose a layer or Clear, then hover to preview the fill region (detail lines only). Click to apply.'
+    }
+    if (placeMode === 'annotate') {
+      if (annotationTool === 'levelLine' || annotationTool === 'textLabel') return undefined
+      if (annotationTool === 'select' && annotationSelectEditLabel) return undefined
+      return 'Hover the annotation buttons in the bottom bar for tool-specific help.'
+    }
+    if (placeMode === 'room' && (roomTool === 'paint' || roomTool === 'rect' || roomTool === 'erase')) {
+      return 'Use Line or Rect for room boundaries, or close areas with walls. Use Fill or Auto-fill from the bottom bar to name zones.'
+    }
+    return undefined
+  }, [
+    traceOverlayEditMode,
+    placeMode,
+    annotationTool,
+    roomTool,
+    annotationSelectEditLabel,
+    connectionDetailAnnotate,
+  ])
+
   return (
     <div className="pointer-events-none absolute inset-x-0 top-12 z-20 flex justify-center px-3 sm:px-4">
       <div className="pointer-events-auto w-full max-w-md min-w-0">
         <ToolbarGroup
           title={title}
+          hint={floatingToolbarHint}
           className="min-w-[12rem] border-border/80 bg-white/95 shadow-lg backdrop-blur-sm"
           bodyClassName="flex-col items-stretch w-full min-w-0"
         >
-          {traceOverlayEditMode ? (
-            <p className="font-mono text-[9px] text-muted-foreground leading-snug px-0.5 py-1">
-              Layer tools are off while you adjust the trace. Press <span className="text-foreground/80">Done</span>{' '}
-              in the bottom overlay panel to return to{' '}
-              {placeMode === 'annotate'
-                ? 'annotations.'
-                : placeMode === 'floor' || placeMode === 'stairs'
-                  ? 'cell paint.'
-                  : placeMode === 'column'
-                    ? 'columns.'
-                    : placeMode === 'room'
-                      ? 'room naming.'
-                      : 'walls and lines.'}
-            </p>
-          ) : placeMode === 'annotate' && annotationTool === 'groundLine' ? (
-            <p className="font-mono text-[9px] text-muted-foreground leading-snug px-0.5 py-1">
-              Elevation only: click the grid for a full-width horizontal <span className="text-foreground/80">ground line</span>.
-              Click another row to move it. <span className="text-foreground/80">Delete</span> in the zoom bar clears it while
-              this tool is active.
-            </p>
-          ) : placeMode === 'annotate' && annotationTool === 'levelLine' ? (
-            <div className="w-full min-w-0">
-              <input
-                type="text"
-                value={levelLineLabelDraft}
-                onChange={(ev) => setLevelLineLabelDraft(ev.target.value)}
-                placeholder="e.g. FF, L2"
-                className="w-full border border-border px-2 py-1.5 font-mono text-[11px] text-foreground bg-white rounded-sm"
-                aria-label="Level line tag (optional)"
-                title="Shown at the left of the line. Click a grid row to add; click the same row again to remove that level line."
-              />
-            </div>
+          {traceOverlayEditMode ? null : placeMode === 'annotate' && annotationTool === 'groundLine' ? null : placeMode === 'annotate' && annotationTool === 'levelLine' ? (
+            <LevelLineDropdown
+              value={levelLineLabelDraft}
+              onChange={setLevelLineLabelDraft}
+              placedLabels={sketch.elevationLevelLines?.map((l) => l.label ?? '') ?? []}
+            />
           ) : placeMode === 'annotate' && annotationTool === 'textLabel' ? (
             <div className="w-full min-w-0">
               <input
@@ -331,6 +654,16 @@ export function ImplementationPlanFloatingToolbar(props: ImplementationPlanFloat
                 title="Click the plan to drop this text at the pointer (plan coordinates). Erase tool removes the nearest label."
               />
             </div>
+          ) : placeMode === 'annotate' &&
+            annotationTool === 'connectionDetailLayerFill' &&
+            connectionDetailAnnotate &&
+            connectionDetailFillLayerRows.length > 0 &&
+            onConnectionDetailFillPickKeyChange ? (
+            <ConnectionDetailFillLayerPicker
+              rows={connectionDetailFillLayerRows}
+              value={connectionDetailFillPickKey}
+              onChange={onConnectionDetailFillPickKeyChange}
+            />
           ) : placeMode === 'annotate' && annotationTool === 'select' && annotationSelectEditLabel ? (
             <div className="w-full min-w-0">
               <input
@@ -352,24 +685,7 @@ export function ImplementationPlanFloatingToolbar(props: ImplementationPlanFloat
                 title="Edits the selected text annotation on the plan. Del / ⌫ removes the selection from the sketch."
               />
             </div>
-          ) : placeMode === 'annotate' ? (
-            <p className="font-mono text-[9px] text-muted-foreground leading-snug px-0.5 py-1">
-              Use the tools below.{' '}
-              {planViewContext.kind === 'elevation' ? (
-                <>
-                  <span className="text-foreground/80">Ground line</span> is the shared grade;{' '}
-                  <span className="text-foreground/80">Level line</span> adds more full-width datums (toggle a row off by
-                  clicking again). Use <span className="text-foreground/80">Erase</span> or{' '}
-                  <span className="text-foreground/80">Select</span> to remove level lines.{' '}
-                </>
-              ) : null}
-              <span className="text-foreground/80">Measure</span> and <span className="text-foreground/80">Grid</span> follow
-              grid edges like wall Line. <span className="text-foreground/80">Section</span> is a straight cut between two
-              nodes. <span className="text-foreground/80">Select</span> picks annotations; with one text label selected, edit
-              it in this bar. <span className="text-foreground/80">Erase</span> uses hover preview; click or drag a box to
-              remove annotations (dimensions → grid refs → sections → labels).
-            </p>
-          ) : placeMode === 'room' && roomTool === 'fill' ? (
+          ) : placeMode === 'annotate' ? null : placeMode === 'room' && roomTool === 'fill' ? (
             <div className="w-full min-w-0">
               <input
                 type="text"
@@ -407,9 +723,11 @@ export function ImplementationPlanFloatingToolbar(props: ImplementationPlanFloat
             <div className="w-full min-w-0 flex flex-col gap-1.5">
               {namedRoomPickerRows.length === 0 ? (
                 !selectedRoomZoneCellKeys?.length ? (
-                  <p className="font-mono text-[9px] text-muted-foreground leading-snug px-0.5 py-1">
-                    No named rooms yet — use <span className="text-foreground/80">Fill</span> inside a closed zone, or click a
-                    filled room on the plan (away from boundary lines).
+                  <p
+                    className="font-mono text-[9px] text-muted-foreground leading-snug px-0.5 py-1 truncate"
+                    title="Use Fill inside a closed zone, or click a filled room on the plan (away from boundary lines)."
+                  >
+                    No named rooms yet.
                   </p>
                 ) : (
                   <input
@@ -463,22 +781,132 @@ export function ImplementationPlanFloatingToolbar(props: ImplementationPlanFloat
                 </>
               )}
             </div>
-          ) : placeMode === 'room' ? (
-            <p className="font-mono text-[9px] text-muted-foreground leading-snug px-0.5 py-1">
-              Use <span className="text-foreground/80">Line</span> or <span className="text-foreground/80">Rect</span> for
-              room boundaries, or close areas with <span className="text-foreground/80">walls</span>. Use{' '}
-              <span className="text-foreground/80">Fill</span> to name one zone per click, or{' '}
-              <span className="text-foreground/80">Auto-fill</span> to number every zone at once.
-            </p>
-          ) : (
-            <PlanSystemPicker
-              options={systemOptions}
-              value={selectValue}
-              placeMode={placeMode}
-              planColorCatalog={planColorCatalog}
-              onChange={onSelectSystem}
-              disabled={systemOptions.length === 0}
-            />
+          ) : placeMode === 'room' ? null : (
+            <>
+              <div className="flex flex-row gap-1.5 w-full min-w-0 items-stretch">
+                <div className="flex-1 min-w-0">
+                  <PlanSystemPicker
+                    options={systemOptions}
+                    value={selectValue}
+                    placeMode={placeMode}
+                    planColorCatalog={planColorCatalog}
+                    onChange={onSelectSystem}
+                    disabled={systemOptions.length === 0}
+                  />
+                </div>
+                {planToolbarOffset ? (
+                  <button
+                    type="button"
+                    onClick={() => setPlanOffsetOpen((o) => !o)}
+                    className={planOffsetOpen ? btnOn : btnIdle}
+                    title={
+                      planToolbarOffset.kind === 'edge'
+                        ? `Perpendicular offset from grid (stored as plan inches). Horizontal: +Y, vertical: +X. ${OFFSET_PARSE_HINT}`
+                        : `ΔX / ΔY from grid center (stored as plan inches). ${OFFSET_PARSE_HINT}`
+                    }
+                  >
+                    Offset
+                  </button>
+                ) : null}
+              </div>
+              {planToolbarOffset && planOffsetOpen ? (
+                <div className="flex flex-col gap-1.5 pt-1.5 mt-0.5 border-t border-border/60 w-full min-w-0">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-mono text-[8px] text-muted-foreground shrink-0">Unit</span>
+                    {offsetUnitSelect}
+                  </div>
+                  <p className="font-mono text-[8px] text-muted-foreground leading-snug">{OFFSET_PARSE_HINT}</p>
+                  {planToolbarOffset.kind === 'edge' ? (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono text-[8px] text-muted-foreground shrink-0">Perp.</span>
+                      <input
+                        type="text"
+                        value={planOffsetEdgeDraft}
+                        onChange={(ev) => setPlanOffsetEdgeDraft(ev.target.value)}
+                        placeholder="e.g. 3/4 or 6 mm"
+                        className="min-w-[6rem] flex-1 max-w-[10rem] border border-border px-1 py-0.5 font-mono text-[10px] bg-white rounded-sm"
+                        title={OFFSET_PARSE_HINT}
+                      />
+                      <button
+                        type="button"
+                        className={btnIdle}
+                        onClick={() => {
+                          const inches = parseLinearMeasureToPlanInches(planOffsetEdgeDraft, offsetMeasureUnit)
+                          if (inches === null) {
+                            window.alert(`Could not parse offset. ${OFFSET_PARSE_HINT}`)
+                            return
+                          }
+                          planToolbarOffset.applyPerp(inches)
+                        }}
+                      >
+                        Apply
+                      </button>
+                      <button
+                        type="button"
+                        className={btnIdle}
+                        onClick={() => {
+                          planToolbarOffset.clear()
+                          setPlanOffsetEdgeDraft('')
+                        }}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-mono text-[8px] text-muted-foreground shrink-0">ΔX</span>
+                        <input
+                          type="text"
+                          value={planOffsetColX}
+                          onChange={(ev) => setPlanOffsetColX(ev.target.value)}
+                          placeholder="0"
+                          className="min-w-[4.5rem] border border-border px-1 py-0.5 font-mono text-[10px] bg-white rounded-sm"
+                          title={OFFSET_PARSE_HINT}
+                        />
+                        <span className="font-mono text-[8px] text-muted-foreground shrink-0">ΔY</span>
+                        <input
+                          type="text"
+                          value={planOffsetColY}
+                          onChange={(ev) => setPlanOffsetColY(ev.target.value)}
+                          placeholder="0"
+                          className="min-w-[4.5rem] border border-border px-1 py-0.5 font-mono text-[10px] bg-white rounded-sm"
+                          title={OFFSET_PARSE_HINT}
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          className={btnIdle}
+                          onClick={() => {
+                            const dx = parseOptionalLinearToPlanInches(planOffsetColX, offsetMeasureUnit)
+                            const dy = parseOptionalLinearToPlanInches(planOffsetColY, offsetMeasureUnit)
+                            if (dx === null || dy === null) {
+                              window.alert(`Could not parse ΔX/ΔY. ${OFFSET_PARSE_HINT}`)
+                              return
+                            }
+                            planToolbarOffset.apply(dx, dy)
+                          }}
+                        >
+                          Apply
+                        </button>
+                        <button
+                          type="button"
+                          className={btnIdle}
+                          onClick={() => {
+                            planToolbarOffset.clear()
+                            setPlanOffsetColX('')
+                            setPlanOffsetColY('')
+                          }}
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </>
           )}
         </ToolbarGroup>
       </div>
@@ -509,6 +937,12 @@ export type ImplementationPlanBottomToolbarProps = {
   annotationTool: AnnotationTool
   setAnnotationTool: (t: AnnotationTool) => void
   setTraceOverlayEditMode: (v: boolean) => void
+  /** When set, only these annotation sub-tools render in Annotate mode (e.g. connection detail: detail line + erase). */
+  allowedAnnotationTools?: readonly AnnotationTool[] | null
+  /** Relabel Section → Detail line and tune tooltips for connection-detail sheets. */
+  connectionDetailAnnotate?: boolean
+  /** When all catalog assembly layers are visible — adds Flip tool for arch lines and columns. */
+  assemblyLayersToolbar?: boolean
 }
 
 export function ImplementationPlanBottomToolbar(props: ImplementationPlanBottomToolbarProps) {
@@ -535,7 +969,12 @@ export function ImplementationPlanBottomToolbar(props: ImplementationPlanBottomT
     annotationTool,
     setAnnotationTool,
     setTraceOverlayEditMode,
+    allowedAnnotationTools,
+    connectionDetailAnnotate = false,
+    assemblyLayersToolbar = false,
   } = props
+
+  const annAllowed = (t: AnnotationTool) => !allowedAnnotationTools || allowedAnnotationTools.includes(t)
 
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-3 sm:px-4">
@@ -701,15 +1140,29 @@ export function ImplementationPlanBottomToolbar(props: ImplementationPlanBottomT
             <>
               {placeMode !== 'floor' &&
                 placeMode !== 'stairs' &&
+                placeMode !== 'roof' &&
                 placeMode !== 'column' &&
                 placeMode !== 'annotate' &&
                 placeMode !== 'room' &&
-                (['paint', 'rect', 'erase', 'select'] as const).map((t) => (
+                !isMepPointMode(placeMode) &&
+                (
+                  [
+                    ...(['paint', 'rect', 'erase', 'select'] as const),
+                    ...(assemblyLayersToolbar && !isMepRunMode(placeMode)
+                      ? (['flipAssembly'] as const)
+                      : []),
+                  ] as LayoutTool[]
+                ).map((t) => (
                   <button
                     key={t}
                     type="button"
                     onClick={() => setStructureTool(t)}
                     className={structureTool === t ? btnOn : btnIdle}
+                    title={
+                      t === 'flipAssembly'
+                        ? 'Click a segment or drag a box: each action toggles interior/exterior assembly stack on multi-layer walls, openings, roof, or stairs'
+                        : undefined
+                    }
                   >
                     {t === 'paint'
                       ? 'Line'
@@ -717,7 +1170,9 @@ export function ImplementationPlanBottomToolbar(props: ImplementationPlanBottomT
                         ? 'Rect'
                         : t === 'erase'
                           ? 'Erase'
-                          : 'Select'}
+                          : t === 'select'
+                            ? 'Select'
+                            : 'Flip'}
                   </button>
                 ))}
               {placeMode === 'room' &&
@@ -750,7 +1205,7 @@ export function ImplementationPlanBottomToolbar(props: ImplementationPlanBottomT
                               : 'Auto'}
                   </button>
                 ))}
-              {(placeMode === 'floor' || placeMode === 'stairs') &&
+              {(placeMode === 'floor' || placeMode === 'stairs' || placeMode === 'roof') &&
                 (['paint', 'fill', 'erase', 'select'] as const).map((t) => (
                   <button
                     key={t}
@@ -773,19 +1228,45 @@ export function ImplementationPlanBottomToolbar(props: ImplementationPlanBottomT
                   </button>
                 ))}
               {placeMode === 'column' &&
-                (['paint', 'erase'] as const).map((t) => (
+                (assemblyLayersToolbar
+                  ? (['paint', 'erase', 'flipAssembly'] as const)
+                  : (['paint', 'erase'] as const)
+                ).map((t) => (
                   <button
                     key={t}
                     type="button"
                     onClick={() => setFloorTool(t)}
                     className={floorTool === t ? btnOn : btnIdle}
+                    title={
+                      t === 'flipAssembly'
+                        ? 'Click a column or drag a box: each action toggles assembly layer order on multi-layer columns'
+                        : undefined
+                    }
                   >
-                    {t === 'paint' ? 'Paint' : 'Erase'}
+                    {t === 'paint' ? 'Paint' : t === 'erase' ? 'Erase' : 'Flip'}
+                  </button>
+                ))}
+              {isMepPointMode(placeMode) &&
+                (['paint', 'erase', 'select'] as const).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setFloorTool(t)}
+                    className={floorTool === t ? btnOn : btnIdle}
+                    title={
+                      t === 'paint'
+                        ? `Place ${PLACE_MODE_LABELS[placeMode]?.toLowerCase() ?? 'device'} symbols on the plan`
+                        : t === 'erase'
+                          ? 'Drag a box to erase symbols inside; tiny drag removes one under the pointer'
+                          : 'Drag a box to select symbols; Shift adds; tiny drag selects one; Delete removes selection'
+                    }
+                  >
+                    {t === 'paint' ? 'Place' : t === 'erase' ? 'Erase' : 'Select'}
                   </button>
                 ))}
               {placeMode === 'annotate' && (
                 <div className="flex flex-wrap gap-1.5 justify-center">
-                  {planViewContext.kind === 'elevation' && (
+                  {planViewContext.kind === 'elevation' && annAllowed('groundLine') && (
                     <button
                       type="button"
                       onClick={() => setAnnotationTool('groundLine')}
@@ -795,7 +1276,7 @@ export function ImplementationPlanBottomToolbar(props: ImplementationPlanBottomT
                       Ground line
                     </button>
                   )}
-                  {planViewContext.kind === 'elevation' && (
+                  {planViewContext.kind === 'elevation' && annAllowed('levelLine') && (
                     <button
                       type="button"
                       onClick={() => setAnnotationTool('levelLine')}
@@ -805,54 +1286,94 @@ export function ImplementationPlanBottomToolbar(props: ImplementationPlanBottomT
                       Level line
                     </button>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => setAnnotationTool('measureLine')}
-                    className={annotationTool === 'measureLine' ? btnOn : btnIdle}
-                    title="Drag along grid edges for a dimension run with length label (Esc clears all dimensions)"
-                  >
-                    Measure
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAnnotationTool('gridLine')}
-                    className={annotationTool === 'gridLine' ? btnOn : btnIdle}
-                    title="Dashed reference polyline on grid edges (no numeric label)"
-                  >
-                    Grid
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAnnotationTool('textLabel')}
-                    className={annotationTool === 'textLabel' ? btnOn : btnIdle}
-                    title="Type text above, then click the plan to place"
-                  >
-                    Text
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAnnotationTool('sectionCut')}
-                    className={annotationTool === 'sectionCut' ? btnOn : btnIdle}
-                    title="Straight section cut line between two grid nodes, with opposing markers"
-                  >
-                    Section
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAnnotationTool('select')}
-                    className={annotationTool === 'select' ? btnOn : btnIdle}
-                    title="Click to select annotations; Shift+click to add or remove from selection; Delete removes selected"
-                  >
-                    Select
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAnnotationTool('erase')}
-                    className={annotationTool === 'erase' ? btnOn : btnIdle}
-                    title="Remove nearest annotation: dimension → grid ref → section line → level line (elevation) → text label"
-                  >
-                    Erase
-                  </button>
+                  {annAllowed('measureLine') && (
+                    <button
+                      type="button"
+                      onClick={() => setAnnotationTool('measureLine')}
+                      className={annotationTool === 'measureLine' ? btnOn : btnIdle}
+                      title="Drag along grid edges for a dimension run with length label (Esc clears all dimensions)"
+                    >
+                      Measure
+                    </button>
+                  )}
+                  {annAllowed('gridLine') && (
+                    <button
+                      type="button"
+                      onClick={() => setAnnotationTool('gridLine')}
+                      className={annotationTool === 'gridLine' ? btnOn : btnIdle}
+                      title="Dashed reference polyline on grid edges (no numeric label)"
+                    >
+                      Grid
+                    </button>
+                  )}
+                  {annAllowed('textLabel') && (
+                    <button
+                      type="button"
+                      onClick={() => setAnnotationTool('textLabel')}
+                      className={annotationTool === 'textLabel' ? btnOn : btnIdle}
+                      title="Type text above, then click the plan to place"
+                    >
+                      Text
+                    </button>
+                  )}
+                  {annAllowed('sectionCut') && (
+                    <button
+                      type="button"
+                      onClick={() => setAnnotationTool('sectionCut')}
+                      className={annotationTool === 'sectionCut' ? btnOn : btnIdle}
+                      title={
+                        connectionDetailAnnotate
+                          ? 'Straight detail line between two grid intersections; diagonals allowed'
+                          : 'Straight section cut line between two grid nodes, with opposing markers'
+                      }
+                    >
+                      {connectionDetailAnnotate ? 'Detail line' : 'Section'}
+                    </button>
+                  )}
+                  {annAllowed('flipConnectionStripLayers') && (
+                    <button
+                      type="button"
+                      onClick={() => setAnnotationTool('flipConnectionStripLayers')}
+                      className={annotationTool === 'flipConnectionStripLayers' ? btnOn : btnIdle}
+                      title="Click a junction strip to reverse wall layer order for that arm (per direction); saved on this sheet"
+                    >
+                      Flip layers
+                    </button>
+                  )}
+                  {connectionDetailAnnotate && annAllowed('connectionDetailLayerFill') && (
+                    <button
+                      type="button"
+                      onClick={() => setAnnotationTool('connectionDetailLayerFill')}
+                      className={annotationTool === 'connectionDetailLayerFill' ? btnOn : btnIdle}
+                      title="Choose a layer in the top bar; hover previews the zone bounded by your detail lines, then click to fill or clear"
+                    >
+                      Layer fill
+                    </button>
+                  )}
+                  {annAllowed('select') && (
+                    <button
+                      type="button"
+                      onClick={() => setAnnotationTool('select')}
+                      className={annotationTool === 'select' ? btnOn : btnIdle}
+                      title="Click to select annotations; Shift+click to add or remove from selection; Delete removes selected"
+                    >
+                      Select
+                    </button>
+                  )}
+                  {annAllowed('erase') && (
+                    <button
+                      type="button"
+                      onClick={() => setAnnotationTool('erase')}
+                      className={annotationTool === 'erase' ? btnOn : btnIdle}
+                      title={
+                        connectionDetailAnnotate
+                          ? 'Tiny drag on a grid segment along a detail line removes that segment (like wall erase); otherwise removes the nearest annotation'
+                          : 'Remove nearest annotation: dimension → grid ref → section line → level line (elevation) → text label'
+                      }
+                    >
+                      Erase
+                    </button>
+                  )}
                 </div>
               )}
             </>

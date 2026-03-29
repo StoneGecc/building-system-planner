@@ -217,8 +217,25 @@ function stripPlanLayoutGridDotsFromSvg(svg: SVGSVGElement): void {
   gridG?.querySelectorAll('circle').forEach((c) => c.remove())
 }
 
-/** svg2pdf is more reliable with `rgb()` / `rgba()` than `hsl()` on stroke/fill attributes. */
-function convertHslPaintAttributesForPdf(svg: SVGSVGElement): void {
+/**
+ * Floor/stair cells use a subtle on-screen stroke (`rgba(0,0,0,0.12)`) so adjacent
+ * fills read as separate tiles. Illustrator imports that as a grey outline on every
+ * rectangle. Remove stroke on exported SVG only; on-canvas view unchanged.
+ */
+function stripFloorCellStrokesForSvgExport(svg: SVGSVGElement): void {
+  const floor = svg.querySelector('#plan-export-floor')
+  if (!floor) return
+  for (const el of floor.querySelectorAll('rect')) {
+    el.setAttribute('stroke', 'none')
+    el.removeAttribute('stroke-width')
+  }
+}
+
+/**
+ * svg2pdf and Adobe Illustrator often mis-handle `hsl()` / `hsla()` on SVG attributes (fills read as black).
+ * Rewrite to `rgb()` / `rgba()` via computed style resolution.
+ */
+function convertHslPaintAttributesToRgb(svg: SVGSVGElement): void {
   const probe = document.createElement('div')
   probe.style.position = 'absolute'
   probe.style.visibility = 'hidden'
@@ -250,7 +267,7 @@ function prepareSvgForPlanPdfExport(svgEl: SVGSVGElement): SVGSVGElement {
   const clone = svgEl.cloneNode(true) as SVGSVGElement
   stripPlanLayoutGridDotsFromSvg(clone)
   expandPlanLayoutGridPatternsForPdf(clone)
-  convertHslPaintAttributesForPdf(clone)
+  convertHslPaintAttributesToRgb(clone)
   const serializer = new XMLSerializer()
   const raw = serializer.serializeToString(clone)
   return parseSvgStringToElement(raw)
@@ -267,6 +284,8 @@ export function downloadPlanLayoutSvg(svgEl: SVGSVGElement | null, basename: str
   }
   const clone = svgEl.cloneNode(true) as SVGSVGElement
   stripPlanLayoutGridDotsFromSvg(clone)
+  stripFloorCellStrokesForSvgExport(clone)
+  convertHslPaintAttributesToRgb(clone)
   const serializer = new XMLSerializer()
   const raw = serializer.serializeToString(clone)
   const fileStr = prepareSvgContent(raw)

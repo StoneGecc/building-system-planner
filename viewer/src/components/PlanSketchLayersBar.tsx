@@ -43,6 +43,11 @@ interface PlanSketchLayersBarProps {
   onAnnotationsLayerActivate?: () => void
   /** When false, MEP layer chips do not switch the editor to MEP (e.g. Layout sheet). */
   allowMepLayerActivate?: boolean
+  /**
+   * Connection-detail / annotation-only surface: skip room flood-fill (avoids footprint × fine grid).
+   * Room boundary segment count still comes from the sketch for display.
+   */
+  lineAnnotationSurface?: boolean
 }
 
 type Acc = {
@@ -55,6 +60,7 @@ type Acc = {
   roofs: number
   stairs: number
   floorCells: number
+  roofCells: number
   stairSquares: number
   columns: number
 }
@@ -81,6 +87,7 @@ export function PlanSketchLayersBar({
   onLayerActivate,
   onAnnotationsLayerActivate,
   allowMepLayerActivate = true,
+  lineAnnotationSurface = false,
 }: PlanSketchLayersBarProps) {
   const rows = useMemo(() => {
     const m = new Map<string, Acc>()
@@ -98,6 +105,7 @@ export function PlanSketchLayersBar({
           roofs: 0,
           stairs: 0,
           floorCells: 0,
+          roofCells: 0,
           stairSquares: 0,
           columns: 0,
         }
@@ -119,6 +127,7 @@ export function PlanSketchLayersBar({
     for (const c of sketch.cells ?? []) {
       const a = touch(c.source, c.systemId)
       if (c.cellKind === 'stairs') a.stairSquares += 1
+      else if (c.cellKind === 'roof') a.roofCells += 1
       else a.floorCells += 1
     }
     for (const col of sketch.columns ?? []) {
@@ -151,6 +160,10 @@ export function PlanSketchLayersBar({
         { source: acc.source, systemId: acc.systemId, cellKind: 'stairs' },
         planColorCatalog,
       ),
+      roofCellFill: planCellFill(
+        { source: acc.source, systemId: acc.systemId, cellKind: 'roof' },
+        planColorCatalog,
+      ),
       columnFill:
         acc.source === 'arch'
           ? planPaintSwatchColor('arch', acc.systemId, 'column', planColorCatalog)
@@ -159,24 +172,57 @@ export function PlanSketchLayersBar({
   }, [sketch.edges, sketch.cells, sketch.columns, sketch.gridSpacingIn, orderedSystems, mepItems, planColorCatalog])
 
   const { enclosedRoomCount, roomBoundaryCount, roomNamedCellCount } = useMemo(() => {
+    const roomBoundaryCount = sketch.roomBoundaryEdges?.length ?? 0
+    if (lineAnnotationSurface) {
+      return {
+        enclosedRoomCount: 0,
+        roomBoundaryCount,
+        roomNamedCellCount: 0,
+      }
+    }
     const delta = sketch.gridSpacingIn
     const { w: siteWIn, h: siteHIn } = resolvedSiteInches(sketch, buildingDimensions)
-    let enclosed = 0
-    if (delta > 0 && siteWIn > 0 && siteHIn > 0) {
-      const { nx, ny } = gridCounts(siteWIn, siteHIn, delta)
-      const barriers = planEnclosureBarrierKeys(sketch.roomBoundaryEdges, sketch.edges)
-      const { rooms } = computeEnclosedRoomComponents(nx, ny, barriers)
-      enclosed = rooms.length
+    const rbc = sketch.roomByCell
+    const rbcKeys = rbc && Object.keys(rbc).length > 0 ? rbc : null
+
+    if (!(delta > 0 && siteWIn > 0 && siteHIn > 0)) {
+      return {
+        enclosedRoomCount: 0,
+        roomBoundaryCount,
+        roomNamedCellCount: 0,
+      }
+    }
+
+    if (roomBoundaryCount === 0 && !rbcKeys) {
+      return {
+        enclosedRoomCount: 0,
+        roomBoundaryCount,
+        roomNamedCellCount: 0,
+      }
+    }
+
+    const { nx, ny } = gridCounts(siteWIn, siteHIn, delta)
+    const barriers = planEnclosureBarrierKeys(sketch.roomBoundaryEdges, sketch.edges)
+    const { rooms } = computeEnclosedRoomComponents(nx, ny, barriers)
+    let namedInZones = 0
+    if (rbcKeys) {
+      for (const room of rooms) {
+        for (const k of room.cellKeys) {
+          if ((rbcKeys[k] ?? '').trim().length > 0) namedInZones += 1
+        }
+      }
     }
     return {
-      enclosedRoomCount: enclosed,
-      roomBoundaryCount: sketch.roomBoundaryEdges?.length ?? 0,
-      roomNamedCellCount: sketch.roomByCell ? Object.keys(sketch.roomByCell).length : 0,
+      enclosedRoomCount: rooms.length,
+      roomBoundaryCount,
+      roomNamedCellCount: namedInZones,
     }
-  }, [sketch, buildingDimensions])
+  }, [sketch, buildingDimensions, lineAnnotationSurface])
 
-  /** Match plan canvas: labels only appear when there is at least one enclosed zone. */
-  const showRoomsLayer = enclosedRoomCount > 0
+  /** Rooms layer: boundaries, fillable zones, or any persisted room labels (incl. orphans until pruned). */
+  const rawRoomByCellKeys = sketch.roomByCell ? Object.keys(sketch.roomByCell).length : 0
+  const showRoomsLayer =
+    roomBoundaryCount > 0 || enclosedRoomCount > 0 || rawRoomByCellKeys > 0
   const roomsSwatch = 'hsl(230, 22%, 42%)'
   const nDim = sketch.measureRuns?.length ?? 0
   const nGrid = sketch.annotationGridRuns?.length ?? 0
@@ -205,7 +251,10 @@ export function PlanSketchLayersBar({
             parts.push(`${formatSiteLinearWithUnit(r.walls * delta, siteDisplayUnit)} wall`)
           }
           if (r.roofs && delta > 0) {
-            parts.push(`${formatSiteLinearWithUnit(r.roofs * delta, siteDisplayUnit)} roof`)
+            parts.push(`${formatSiteLinearWithUnit(r.roofs * delta, siteDisplayUnit)} roof edge`)
+          }
+          if (r.roofCells && delta > 0) {
+            parts.push(`${formatPlanAreaFromSqIn(r.roofCells * delta * delta, siteDisplayUnit)} roof`)
           }
           if (r.windows && delta > 0) {
             parts.push(`${formatSiteLinearWithUnit(r.windows * delta, siteDisplayUnit)} window`)
@@ -271,7 +320,14 @@ export function PlanSketchLayersBar({
                   <span
                     className="block h-2.5 w-2.5 rounded-sm border border-black/20 shrink-0"
                     style={{ backgroundColor: r.roofStroke }}
-                    title="Roof edge"
+                    title="Roof edge (line)"
+                  />
+                )}
+                {r.roofCells > 0 && (
+                  <span
+                    className="block h-2.5 w-2.5 rounded-sm border border-black/20 shrink-0"
+                    style={{ backgroundColor: r.roofCellFill }}
+                    title="Roof area fill"
                   />
                 )}
                 {r.windows > 0 && (
@@ -410,8 +466,10 @@ export function PlanSketchLayersBar({
               <div className="font-mono text-[9px] text-foreground leading-tight truncate">Rooms</div>
               <div className="font-mono text-[8px] text-muted-foreground leading-tight truncate">
                 {[
-                  `${enclosedRoomCount} enclosed zone${enclosedRoomCount === 1 ? '' : 's'}`,
                   roomBoundaryCount > 0 ? `${roomBoundaryCount} boundary segment${roomBoundaryCount === 1 ? '' : 's'}` : null,
+                  roomBoundaryCount > 0
+                    ? `${enclosedRoomCount} fillable zone${enclosedRoomCount === 1 ? '' : 's'}`
+                    : null,
                   roomNamedCellCount > 0
                     ? `${roomNamedCellCount} named cell${roomNamedCellCount === 1 ? '' : 's'}`
                     : null,

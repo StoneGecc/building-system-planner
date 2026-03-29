@@ -69,6 +69,97 @@ export function inchesToSiteDisplay(inches: number, unit: PlanSiteDisplayUnit): 
   }
 }
 
+/**
+ * Parse a numeric expression with optional fractions (in the caller’s display unit before suffix).
+ * Supports: decimals (`1.5`), simple fractions (`3/4`, `-1/2`), mixed with space (`3 1/2`),
+ * mixed with hyphen (`3-1/2`). Commas are treated as decimal separators.
+ */
+function parseRationalExpression(expr: string): number | null {
+  const t = expr.trim().replace(/,/g, '.')
+  if (!t) return null
+
+  const mixedSpace = t.match(/^(-?)(\d+)\s+(\d+)\s*\/\s*(\d+)$/)
+  if (mixedSpace) {
+    const sign = mixedSpace[1] === '-' ? -1 : 1
+    const w = Number(mixedSpace[2])
+    const num = Number(mixedSpace[3])
+    const den = Number(mixedSpace[4])
+    if (den === 0 || ![w, num, den].every(Number.isFinite)) return null
+    return sign * (w + num / den)
+  }
+
+  const mixedHyphen = t.match(/^(\d+)\s*-\s*(\d+)\s*\/\s*(\d+)$/)
+  if (mixedHyphen) {
+    const w = Number(mixedHyphen[1])
+    const num = Number(mixedHyphen[2])
+    const den = Number(mixedHyphen[3])
+    if (den === 0 || ![w, num, den].every(Number.isFinite)) return null
+    return w + num / den
+  }
+
+  const pureFrac = t.match(/^(-?\d+)\s*\/\s*(\d+)$/)
+  if (pureFrac) {
+    const num = Number(pureFrac[1])
+    const den = Number(pureFrac[2])
+    if (den === 0) return null
+    return num / den
+  }
+
+  const dec = parseFloat(t)
+  if (Number.isFinite(dec)) return dec
+  return null
+}
+
+/** Strip a trailing linear unit token; remainder is the magnitude in that unit (or default). */
+function stripLinearUnitSuffix(input: string): { rest: string; unit: PlanSiteDisplayUnit | null } {
+  const t = input.trim()
+  if (!t) return { rest: '', unit: null }
+
+  const tryStrip = (re: RegExp, unit: PlanSiteDisplayUnit): { rest: string; unit: PlanSiteDisplayUnit } | null => {
+    const m = t.match(re)
+    if (!m) return null
+    const rest = m[1]!.trim()
+    if (rest === '') return null
+    return { rest, unit }
+  }
+
+  return (
+    tryStrip(/^(.*)\s*mm\s*$/i, 'mm') ??
+    tryStrip(/^(.*)\s*(yd|yard|yards)\s*$/i, 'yd') ??
+    tryStrip(/^(.*)\s*(in|inch|inches)\s*$/i, 'in') ??
+    tryStrip(/^(.*)(?:\s*)(?:\"|\u2033)\s*$/i, 'in') ??
+    tryStrip(/^(.*)\s*(ft|feet|foot|')\s*$/i, 'ft') ??
+    tryStrip(/^(.*)\s*(m|meter|meters)\s*$/i, 'm') ??
+    { rest: t, unit: null }
+  )
+}
+
+/**
+ * Parse a user-typed linear distance into **plan inches**.
+ * Optional suffix overrides the default unit: `in`, `ft`, `yd`, `mm`, `m`, `"` (inches).
+ * Fractions and mixed numbers use the effective unit (suffix or `defaultUnit`).
+ */
+export function parseLinearMeasureToPlanInches(
+  raw: string,
+  defaultUnit: PlanSiteDisplayUnit,
+): number | null {
+  const { rest, unit } = stripLinearUnitSuffix(raw)
+  if (!rest) return null
+  const u = unit ?? defaultUnit
+  const n = parseRationalExpression(rest)
+  if (n === null || !Number.isFinite(n)) return null
+  return inchesFromSiteDisplay(n, u)
+}
+
+/** Like `parseLinearMeasureToPlanInches`, but blank input → `0` (for ΔX/ΔY where one axis may be omitted). */
+export function parseOptionalLinearToPlanInches(
+  raw: string,
+  defaultUnit: PlanSiteDisplayUnit,
+): number | null {
+  if (!raw.trim()) return 0
+  return parseLinearMeasureToPlanInches(raw, defaultUnit)
+}
+
 /** String for grid spacing or site width/depth inputs. */
 export function formatSiteMeasure(inches: number, unit: PlanSiteDisplayUnit, maxDecimals = 6): string {
   const v = inchesToSiteDisplay(inches, unit)

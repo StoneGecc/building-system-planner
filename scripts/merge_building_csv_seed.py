@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CSV_PATH = ROOT / "Building_Systems_Complete.csv"
+CSV_PATH = ROOT / "viewer" / "public" / "Building_Systems_Complete.csv"
 SEED_PATH = ROOT / "viewer" / "scripts" / "seed-output.json"
 
 

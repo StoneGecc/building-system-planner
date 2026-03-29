@@ -14,6 +14,8 @@ The viewer loads **any** CSV that follows this contract. Do not rely on specific
 | `Category` | `A`, `B`, `C`, or `D` (required for every system). |
 | `#` | Layer index `1`…`n` or `TOTAL`. |
 | `Layer`, `Material`, `Thickness_in`, `Approx_R_Value`, … | Through `Drawing_Note` (existing layer model). |
+| `Fill` | Named material token (`CLT`, `WOOD`, …) for semantics / search, **or** exactly six hex digits (optional leading `#`) as a solid fill override. |
+| `Layer_Color` | **Per layer:** six hex digits (`rrggbb`) or `#rrggbb` for solid fills in section/plan layer graphics. If empty, a hex may still be taken from `Fill` when `Fill` is six hex digits. Default palette by `Layer_Type` matches `LAYER_TYPE_FALLBACK` in `viewer/src/lib/layerDiagramFill.ts` (e.g. `CLT` → `c4a574`, `INSULATION` → `f5e6a3`). `TOTAL` summary rows may leave this empty. |
 
 ## Optional columns (metadata)
 
@@ -38,6 +40,8 @@ On **each data row**, these may be empty. The parser reads diagram/view metadata
 ## Layer drawing columns (per layer row)
 
 Parsed into the viewer for section graphics. May be empty; empty draw toggles inherit from the effective **diagram detail level** (see below).
+
+Layer **fill**: set `Layer_Color` (preferred) or a hex value in `Fill` so each real layer row has an explicit color; otherwise the viewer uses a visible missing-data color (`#dc2626`). See **`Fill` / `Layer_Color`** in the required-columns table above.
 
 | Column | Purpose |
 |--------|---------|
@@ -126,4 +130,4 @@ A minimal second project file with **non-`A4` IDs** lives at [`viewer/fixtures/m
 
 ## File
 
-Primary file in this repo: `Building_Systems_Complete.csv`.
+Primary file in this repo: `viewer/public/Building_Systems_Complete.csv`.

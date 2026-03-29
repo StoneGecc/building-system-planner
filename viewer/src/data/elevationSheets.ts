@@ -1,10 +1,15 @@
 import type { BuildingDimensions } from '../types/system'
 import type { PlanLayoutSketch } from '../types/planLayout'
 import { resolvedSiteInches } from '../types/planLayout'
-import { FLOOR1_SKETCH_PAGE_BASE, FLOOR1_SKETCH_PAGE_COUNT } from './floor1Sheets'
+import { LEVEL_PAGES_START, SHEETS_PER_LEVEL } from './floor1Sheets'
 
-/** First page index for elevation sketch views (after all Floor 1 pages). */
-export const ELEVATION_SKETCH_PAGE_BASE = FLOOR1_SKETCH_PAGE_BASE + FLOOR1_SKETCH_PAGE_COUNT
+/** @deprecated Use elevationSketchPageBaseDynamic */
+export const ELEVATION_SKETCH_PAGE_BASE = LEVEL_PAGES_START + SHEETS_PER_LEVEL
+
+/** First page index for elevation sketch views (after all level pages). */
+export function elevationSketchPageBaseDynamic(numLevels: number): number {
+  return LEVEL_PAGES_START + numLevels * SHEETS_PER_LEVEL
+}
 
 export type ElevationFace = 'N' | 'E' | 'S' | 'W'
 
@@ -18,51 +23,59 @@ export type ElevationSheetDef = {
   pageIndex: number
 }
 
-function def(i: number, partial: Omit<ElevationSheetDef, 'pageIndex'>): ElevationSheetDef {
-  return { ...partial, pageIndex: ELEVATION_SKETCH_PAGE_BASE + i }
+const ELEVATION_TEMPLATES: readonly Omit<ElevationSheetDef, 'pageIndex'>[] = [
+  { id: 'elevation_n', face: 'N', label: 'North', badge: 'N' },
+  { id: 'elevation_e', face: 'E', label: 'East', badge: 'E' },
+  { id: 'elevation_s', face: 'S', label: 'South', badge: 'S' },
+  { id: 'elevation_w', face: 'W', label: 'West', badge: 'W' },
+]
+
+/** Build elevation sheet defs for a given number of levels. */
+export function buildElevationSheets(numLevels: number): ElevationSheetDef[] {
+  const base = elevationSketchPageBaseDynamic(numLevels)
+  return ELEVATION_TEMPLATES.map((t, i) => ({ ...t, pageIndex: base + i }))
 }
 
-export const ELEVATION_SHEETS: readonly ElevationSheetDef[] = [
-  def(0, { id: 'elevation_n', face: 'N', label: 'North', badge: 'N' }),
-  def(1, { id: 'elevation_e', face: 'E', label: 'East', badge: 'E' }),
-  def(2, { id: 'elevation_s', face: 'S', label: 'South', badge: 'S' }),
-  def(3, { id: 'elevation_w', face: 'W', label: 'West', badge: 'W' }),
-] as const
+/** Backward-compatible elevation sheets (1 level). */
+export const ELEVATION_SHEETS: readonly ElevationSheetDef[] = buildElevationSheets(1)
 
-export const ELEVATION_SKETCH_PAGE_COUNT = ELEVATION_SHEETS.length
+export const ELEVATION_SKETCH_PAGE_COUNT = ELEVATION_TEMPLATES.length
 
-const byPageIndex = new Map<number, ElevationSheetDef>()
-for (const s of ELEVATION_SHEETS) {
-  byPageIndex.set(s.pageIndex, s)
+export function elevationSheetFromPageIndexDynamic(
+  pageIndex: number,
+  numLevels: number,
+): ElevationSheetDef | null {
+  const base = elevationSketchPageBaseDynamic(numLevels)
+  const offset = pageIndex - base
+  if (offset < 0 || offset >= ELEVATION_TEMPLATES.length) return null
+  return { ...ELEVATION_TEMPLATES[offset]!, pageIndex }
 }
 
+/** @deprecated Use elevationSheetFromPageIndexDynamic */
 export function elevationSheetFromPageIndex(pageIndex: number): ElevationSheetDef | null {
-  return byPageIndex.get(pageIndex) ?? null
+  return elevationSheetFromPageIndexDynamic(pageIndex, 1)
 }
 
+export function isElevationSketchPageDynamic(pageIndex: number, numLevels: number): boolean {
+  return elevationSheetFromPageIndexDynamic(pageIndex, numLevels) != null
+}
+
+/** @deprecated Use isElevationSketchPageDynamic */
 export function isElevationSketchPage(pageIndex: number): boolean {
-  return (
-    pageIndex >= ELEVATION_SKETCH_PAGE_BASE &&
-    pageIndex < ELEVATION_SKETCH_PAGE_BASE + ELEVATION_SKETCH_PAGE_COUNT
-  )
+  return isElevationSketchPageDynamic(pageIndex, 1)
 }
 
+export function isPlanSketchPageDynamic(pageIndex: number, numLevels: number): boolean {
+  const base = LEVEL_PAGES_START
+  const end = elevationSketchPageBaseDynamic(numLevels) + ELEVATION_SKETCH_PAGE_COUNT
+  return pageIndex >= base && pageIndex < end
+}
+
+/** @deprecated Use isPlanSketchPageDynamic */
 export function isPlanSketchPage(pageIndex: number): boolean {
-  return (
-    pageIndex >= FLOOR1_SKETCH_PAGE_BASE &&
-    pageIndex < ELEVATION_SKETCH_PAGE_BASE + ELEVATION_SKETCH_PAGE_COUNT
-  )
+  return isPlanSketchPageDynamic(pageIndex, 1)
 }
 
-/**
- * Elevation canvas in plan inches — **same global setup as the Floor Layout sketch**, not separate CSV-only
- * footprint sizes. Horizontal span uses `resolvedSiteInches(layoutSketch, d)` (Setup lot width / depth);
- * vertical span uses `heightIn` (layout sketch building height or caller default). Grid spacing still comes
- * from `layoutSketch.gridSpacingIn` in the editor.
- *
- * **Axes:** `widthIn` = left–right on screen; `heightIn` = building height (top of SVG toward roof).
- * N/S facades span the plan **width** (lot W); E/W span the plan **depth** (lot D).
- */
 export function elevationCanvasInches(
   face: ElevationFace,
   heightIn: number,

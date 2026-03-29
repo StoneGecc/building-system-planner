@@ -4,6 +4,8 @@
  */
 
 import type { BuildingDimensions, SystemData } from '../types/system'
+import { resolveDiagramHatchFill } from '../lib/layerDiagramFill'
+import { planHexFromFirstLayer } from '../lib/planLayerColors'
 import {
   computeSchematicFrame,
   denormalizePlanZones,
@@ -28,6 +30,8 @@ export interface SystemPlacement {
   systemId: string
   shortName: string
   hatchId: string
+  /** Solid fill for composite section/plan zones (from CSV diagram color / hatch palette). */
+  fillColor: string
   sectionZones: Zone[]
   planZones: Zone[]
 }
@@ -93,10 +97,13 @@ export function buildLayout(d: BuildingDimensions, systems: SystemData[]): Build
     const planZones = denormalizePlanZones(frame, planN)
     const shortName = (sys.diagramLabel ?? sys.name).toUpperCase()
     const hatchId = (sys.diagramHatch ?? 'p-MISC').trim() || 'p-MISC'
+    /** Same rule as implementation plan: first CSV layer row `Layer_Color` / `Layer_Type` palette. */
+    const fillColor = planHexFromFirstLayer(sys)
     return {
       systemId: sys.id,
       shortName,
       hatchId,
+      fillColor,
       sectionZones,
       planZones,
     }
@@ -125,6 +132,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-01',
       shortName: 'CLT WALL–FLOOR CONNECTION',
       hatchId: 'p-METAL',
+      fillColor: resolveDiagramHatchFill('p-METAL'),
       sectionZones: [
         { x: SX.wallL, y: SY.slab23Top - 4, w: SX.intL - SX.wallL, h: 8, leaderX: SX.wallL + 25, leaderY: SY.slab23Top },
         { x: SX.wallL, y: SY.slab12Top - 4, w: SX.intL - SX.wallL, h: 8, leaderX: SX.wallL + 25, leaderY: SY.slab12Top },
@@ -136,6 +144,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-02',
       shortName: 'CLT FLOOR ACOUSTIC ASSEMBLY',
       hatchId: 'p-CLT',
+      fillColor: resolveDiagramHatchFill('p-CLT'),
       sectionZones: [
         { x: SX.intL, y: SY.slab23Top, w: SX.voidW - SX.intL, h: SY.slab23Bot - SY.slab23Top },
         { x: SX.intL, y: SY.slab12Top, w: SX.voidW - SX.intL, h: SY.slab12Bot - SY.slab12Top },
@@ -151,6 +160,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-03',
       shortName: 'CLT ROOF ASSEMBLY',
       hatchId: 'p-CLT',
+      fillColor: resolveDiagramHatchFill('p-CLT'),
       sectionZones: [
         { x: SX.intL, y: SY.roofEnv, w: SX.intR - SX.intL, h: SY.roofCLT - SY.roofEnv, leaderX: (SX.intL + SX.intR) / 2, leaderY: SY.roofEnv + 5 },
         { x: SX.intL, y: SY.roofCLT, w: SX.intR - SX.intL, h: SY.fl3Top - SY.roofCLT, leaderX: (SX.intL + SX.intR) / 2, leaderY: SY.roofCLT + 5 },
@@ -161,6 +171,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-04',
       shortName: 'CLT WALL PANEL (STRUCTURAL)',
       hatchId: 'p-CLT',
+      fillColor: resolveDiagramHatchFill('p-CLT'),
       sectionZones: [
         { x: SX.intL - cltPx, y: SY.parapet, w: cltPx, h: SY.grade - SY.parapet, leaderX: SX.intL - cltPx / 2, leaderY: 240 },
         { x: SX.intR, y: SY.parapet, w: cltPx, h: SY.grade - SY.parapet, leaderX: SX.intR + cltPx / 2, leaderY: 380 },
@@ -173,6 +184,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-05',
       shortName: 'CLT PANEL-TO-PANEL CONNECTIONS',
       hatchId: 'p-MISC',
+      fillColor: resolveDiagramHatchFill('p-MISC'),
       sectionZones: [
         { x: SX.intL, y: SY.slab23Top + 2, w: 8, h: 8, leaderX: SX.intL + 4, leaderY: SY.slab23Top + 6 },
         { x: SX.intL, y: SY.slab12Top + 2, w: 8, h: 8 },
@@ -185,6 +197,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-06',
       shortName: 'EXTERIOR WALL (PRIMARY + OPERABLE SCREEN)',
       hatchId: 'p-INSULATION',
+      fillColor: resolveDiagramHatchFill('p-INSULATION'),
       sectionZones: [
         { x: SX.wallL + 6, y: SY.parapet, w: 30, h: SY.grade - SY.parapet, leaderX: SX.wallL + 20, leaderY: 180 },
         { x: SX.intR + 4, y: SY.parapet, w: 30, h: SY.grade - SY.parapet, leaderX: SX.intR + 18, leaderY: 180 },
@@ -203,6 +216,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-07',
       shortName: 'GROUND / SLAB ON GRADE',
       hatchId: 'p-CONCRETE',
+      fillColor: resolveDiagramHatchFill('p-CONCRETE'),
       sectionZones: [
         { x: SX.intL, y: SY.grade, w: SX.voidW - SX.intL, h: SY.slabBot - SY.grade, leaderX: (SX.intL + SX.voidW) / 2, leaderY: SY.grade + 10 },
         { x: SX.intL, y: SY.slabBot, w: SX.voidW - SX.intL, h: SY.subgrade - SY.slabBot, leaderX: (SX.intL + SX.voidW) / 2, leaderY: SY.slabBot + 15 },
@@ -213,6 +227,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-08',
       shortName: 'WINDOW / OPENING ASSEMBLY',
       hatchId: 'p-GLASS',
+      fillColor: resolveDiagramHatchFill('p-GLASS'),
       sectionZones: [
         { x: SX.wallL - 2, y: SY.fl3Top + 40, w: SX.intL - SX.wallL + 4, h: 80, leaderX: SX.wallL, leaderY: SY.fl3Top + 80 },
         { x: SX.wallL - 2, y: SY.fl2Top + 40, w: SX.intL - SX.wallL + 4, h: 80, leaderX: SX.wallL, leaderY: SY.fl2Top + 80 },
@@ -226,6 +241,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-09',
       shortName: 'CEILING SYSTEM (CLT + BATTEN GRID)',
       hatchId: 'p-WOOD',
+      fillColor: resolveDiagramHatchFill('p-WOOD'),
       sectionZones: [
         { x: SX.intL + 10, y: SY.slab23Bot, w: SX.voidW - SX.intL - 20, h: 10, leaderX: SX.intL + 80, leaderY: SY.slab23Bot + 5 },
         { x: SX.intL + 10, y: SY.slab12Bot, w: SX.voidW - SX.intL - 20, h: 10, leaderX: SX.intL + 80, leaderY: SY.slab12Bot + 5 },
@@ -236,6 +252,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-10',
       shortName: 'INTERIOR PARTITION WALL',
       hatchId: 'p-INSULATION',
+      fillColor: resolveDiagramHatchFill('p-INSULATION'),
       sectionZones: [
         { x: SX.partW1, y: SY.fl3Top, w: SX.partE1 - SX.partW1, h: SY.slab23Top - SY.fl3Top, leaderX: SX.partW1 + 10, leaderY: 200 },
         { x: SX.partW1, y: SY.fl2Top, w: SX.partE1 - SX.partW1, h: SY.slab12Top - SY.fl2Top, leaderX: SX.partW1 + 10, leaderY: 380 },
@@ -249,6 +266,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-11',
       shortName: 'STAIR SYSTEM ASSEMBLY',
       hatchId: 'p-CLT',
+      fillColor: resolveDiagramHatchFill('p-CLT'),
       sectionZones: [
         { x: SX.stairL, y: SY.fl3Top, w: SX.stairR - SX.stairL, h: SY.grade - SY.fl3Top, leaderX: (SX.stairL + SX.stairR) / 2, leaderY: 400 },
       ],
@@ -260,6 +278,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-12',
       shortName: 'GUARDRAIL / EDGE CONDITION',
       hatchId: 'p-METAL',
+      fillColor: resolveDiagramHatchFill('p-METAL'),
       sectionZones: [
         { x: SX.balcR - 6, y: SY.slab23Top - 48, w: 6, h: 48, leaderX: SX.balcR - 3, leaderY: SY.slab23Top - 30 },
       ],
@@ -271,6 +290,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-13',
       shortName: 'VERTICAL VOID / COURTYARD WALL',
       hatchId: 'p-CLT',
+      fillColor: resolveDiagramHatchFill('p-CLT'),
       sectionZones: [
         { x: SX.voidW, y: SY.parapet, w: SX.voidE - SX.voidW, h: SY.grade - SY.parapet, leaderX: (SX.voidW + SX.voidE) / 2, leaderY: 250 },
       ],
@@ -282,6 +302,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-14',
       shortName: 'BALCONY / TERRACE ASSEMBLY',
       hatchId: 'p-WOOD',
+      fillColor: resolveDiagramHatchFill('p-WOOD'),
       sectionZones: [
         { x: SX.balcL, y: SY.slab23Top, w: SX.balcR - SX.balcL, h: SY.slab23Bot - SY.slab23Top + 10, leaderX: (SX.balcL + SX.balcR) / 2, leaderY: SY.slab23Top + 8 },
       ],
@@ -293,6 +314,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-15',
       shortName: 'RAINWATER (ROOF TO CISTERN)',
       hatchId: 'p-GRAVEL_SOIL',
+      fillColor: resolveDiagramHatchFill('p-GRAVEL_SOIL'),
       sectionZones: [
         { x: SX.intL + 30, y: SY.slabBot + 5, w: 120, h: SY.subgrade - SY.slabBot - 10, leaderX: SX.intL + 90, leaderY: SY.slabBot + 20 },
       ],
@@ -302,6 +324,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-16',
       shortName: 'GREEN / PLANTING WELL SYSTEM',
       hatchId: 'p-GRAVEL_SOIL',
+      fillColor: resolveDiagramHatchFill('p-GRAVEL_SOIL'),
       sectionZones: [
         { x: SX.intL + 80, y: SY.parapet, w: 180, h: 18, leaderX: SX.intL + 170, leaderY: SY.parapet + 9 },
       ],
@@ -313,6 +336,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-17',
       shortName: 'PASSIVE VENTILATION STRATEGY',
       hatchId: 'p-AIR_GAP',
+      fillColor: resolveDiagramHatchFill('p-AIR_GAP'),
       sectionZones: [
         { x: SX.voidW + 4, y: SY.parapet + 20, w: SX.voidE - SX.voidW - 8, h: SY.grade - SY.parapet - 20, leaderX: (SX.voidW + SX.voidE) / 2, leaderY: 160 },
       ],
@@ -324,6 +348,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-18',
       shortName: 'COURTYARD TREE SYSTEM',
       hatchId: 'p-GRAVEL_SOIL',
+      fillColor: resolveDiagramHatchFill('p-GRAVEL_SOIL'),
       sectionZones: [
         { x: SX.voidW + 10, y: SY.grade - 28, w: SX.voidE - SX.voidW - 20, h: 24, leaderX: (SX.voidW + SX.voidE) / 2, leaderY: SY.grade - 16 },
       ],
@@ -335,6 +360,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-19',
       shortName: 'PODIUM / TRANSFER SLAB',
       hatchId: 'p-CONCRETE',
+      fillColor: resolveDiagramHatchFill('p-CONCRETE'),
       sectionZones: [
         { x: SX.intL, y: SY.grade - 2, w: SX.voidW - SX.intL, h: 6, leaderX: (SX.intL + SX.voidW) / 2, leaderY: SY.grade + 1 },
       ],
@@ -344,6 +370,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-20',
       shortName: 'FOOTING SYSTEM',
       hatchId: 'p-CONCRETE',
+      fillColor: resolveDiagramHatchFill('p-CONCRETE'),
       sectionZones: [
         { x: SX.intL - 8, y: SY.subgrade - 6, w: SX.voidW - SX.intL + 16, h: 8, leaderX: SX.intL + 40, leaderY: SY.subgrade - 2 },
       ],
@@ -353,6 +380,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-21',
       shortName: 'FOUNDATION WALL',
       hatchId: 'p-MEMBRANE',
+      fillColor: resolveDiagramHatchFill('p-MEMBRANE'),
       sectionZones: [
         { x: SX.wallL - 4, y: SY.slabBot, w: 6, h: SY.grade - SY.slabBot, leaderX: SX.wallL - 1, leaderY: SY.grade - 40 },
       ],
@@ -362,6 +390,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-22',
       shortName: 'WALL BASE (CLT TO CONCRETE)',
       hatchId: 'p-WOOD',
+      fillColor: resolveDiagramHatchFill('p-WOOD'),
       sectionZones: [
         { x: SX.wallL, y: SY.grade - 10, w: SX.intL - SX.wallL, h: 10, leaderX: SX.wallL + 20, leaderY: SY.grade - 5 },
       ],
@@ -371,6 +400,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-23',
       shortName: 'ACOUSTIC CEILING BELOW CLT',
       hatchId: 'p-MISC',
+      fillColor: resolveDiagramHatchFill('p-MISC'),
       sectionZones: [],
       planZones: [],
     },
@@ -378,6 +408,7 @@ export function computeDiagramSeedPlacements(frame: SchematicFrame, d: BuildingD
       systemId: 'A4-24',
       shortName: 'GLT BEAM (LONG-SPAN ROOMS)',
       hatchId: 'p-WOOD',
+      fillColor: resolveDiagramHatchFill('p-WOOD'),
       sectionZones: [
         {
           x: SX.partE1 + 8,

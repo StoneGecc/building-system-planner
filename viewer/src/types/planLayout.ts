@@ -17,6 +17,11 @@ export interface PlacedGridEdge extends GridEdgeKey {
   kind: EdgeStrokeKind
   /** `doorSwing` only: hinge at start vs end node when placing. */
   doorHinge?: 'start' | 'end'
+  /**
+   * Arch plan display only: shift stroke perpendicular to the grid segment (plan inches).
+   * `axis === 'h'`: +value → +plan Y; `axis === 'v'`: +value → +plan X. Ignored for MEP.
+   */
+  perpOffsetPlanIn?: number
 }
 
 /** Unit cell (i,j) fills the square from grid node (i,j) to (i+1,j+1) — flooring / zones. */
@@ -25,8 +30,8 @@ export interface PlacedFloorCell {
   j: number
   systemId: string
   source: 'arch' | 'mep'
-  /** Omitted or `'floor'` — normal floor paint; `'stairs'` — stair tool (full cell squares). */
-  cellKind?: 'floor' | 'stairs'
+  /** Omitted or `'floor'` — floor paint; `'stairs'` — stair squares; `'roof'` — roof area fill (same grid as floor). */
+  cellKind?: 'floor' | 'stairs' | 'roof'
 }
 
 /** Square column footprint in plan inches, centered at (cxIn, cyIn). */
@@ -37,6 +42,27 @@ export interface PlacedPlanColumn {
   sizeIn: number
   systemId: string
   source: 'arch'
+  /** Optional shift from snapped center in plan inches (display only). */
+  offsetXPlanIn?: number
+  offsetYPlanIn?: number
+}
+
+/** Point-placed MEP device/equipment/fixture on the plan canvas. */
+export interface PlacedMepDevice {
+  id: string
+  /** Plan-inches X from site origin. */
+  cxIn: number
+  /** Plan-inches Y from site origin. */
+  cyIn: number
+  /** Fallback square diameter in plan inches (used when lengthIn/widthIn are absent). */
+  sizeIn: number
+  /** Equipment footprint length (long axis) in plan inches; 0 or absent = circle fallback via sizeIn. */
+  lengthIn?: number
+  /** Equipment footprint width (short axis) in plan inches; 0 or absent = circle fallback via sizeIn. */
+  widthIn?: number
+  systemId: string
+  /** Discipline sub-category, e.g. 'valve', 'panel', 'diffuser', 'head'. */
+  category: string
 }
 
 export const PLAN_LAYOUT_VERSION = 1 as const
@@ -95,6 +121,75 @@ export type ElevationLevelLine = {
   label?: string
 }
 
+/** Derived view-model for a building level used in the sidebar and elevation projection. */
+export type BuildingLevel = {
+  id: string
+  label: string
+  /** Grid row on the elevation canvas (0 = bottom of canvas). */
+  j: number
+  /** Display order (0 = bottommost level). */
+  order: number
+}
+
+export const DEFAULT_LEVEL_PRESETS: readonly string[] = [
+  'Top of Footing',
+  'Slab / Foundation',
+  'Level 1',
+  'Level 2',
+  'Level 3',
+  'Level 4',
+  'Roof',
+  'Top of Parapet',
+]
+
+/**
+ * Derive ordered building levels from elevation level lines.
+ *
+ * All levels (including the always-present "Level 1" at id `__default_level_1`) are
+ * sorted by `j` ascending: smaller j = higher on the SVG canvas = higher in the building,
+ * listed first (top of the sidebar). Larger j = lower on canvas = lower levels appear
+ * toward the bottom of the sidebar.
+ * Level 1 is identified by its stable id `__default_level_1` throughout the app —
+ * NOT by being at index 0 — so it can appear anywhere in the vertical order.
+ */
+export function buildingLevelsFromLines(lines: ElevationLevelLine[] | undefined): BuildingLevel[] {
+  // The "Level 1" datum line (if placed) tells us its j-position for elevation projection.
+  const level1Line = lines?.find((l) => l.label === 'Level 1')
+
+  const defaultLevel1: BuildingLevel = {
+    id: '__default_level_1',
+    label: 'Level 1',
+    j: level1Line?.j ?? 0,
+    order: 0,
+  }
+
+  if (!lines || lines.length === 0) {
+    return [defaultLevel1]
+  }
+
+  // Non-Level-1 datum lines each become their own floor group.
+  const otherLines = lines.filter((l) => l.label !== 'Level 1')
+  const otherLevels: BuildingLevel[] = otherLines.map((l) => ({
+    id: l.id,
+    label: l.label || 'Level',
+    j: l.j,
+    order: 0, // will be assigned after sorting
+  }))
+
+  // Sort ALL levels by j ascending: higher elevations (smaller j) at top of sidebar,
+  // lower levels (larger j) at bottom. Tie-break: Level 1 after same-j peers by id.
+  const all = [defaultLevel1, ...otherLevels]
+  all.sort((a, b) => {
+    const dj = a.j - b.j
+    if (dj !== 0) return dj
+    if (a.id === '__default_level_1') return 1
+    if (b.id === '__default_level_1') return -1
+    return a.id.localeCompare(b.id)
+  })
+
+  return all.map((l, idx) => ({ ...l, order: idx }))
+}
+
 export interface PlanLayoutSketch {
   version: typeof PLAN_LAYOUT_VERSION
   gridSpacingIn: number
@@ -134,6 +229,51 @@ export interface PlanLayoutSketch {
   roomByCell?: Record<string, string>
   /** Column tool: square footprints in plan inches. Omitted when empty. */
   columns?: PlacedPlanColumn[]
+  /** MEP device/equipment/fixture point placements. Omitted when empty. */
+  mepDevices?: PlacedMepDevice[]
+  /**
+   * Grid spacing (plan inches) for connection-detail sheets only — independent of `gridSpacingIn` (floor layout).
+   * Stored on the Level 1 layout sketch; omitted → same default as `CONNECTION_DETAIL_GRID_SPACING_IN` (1 in).
+   */
+  connectionDetailGridSpacingIn?: number
+  /**
+   * Extra connection-detail grid cells to pad on each side of the junction box (width/height grow by 2× this × detail Δ).
+   * Stored on Level 1 layout; omitted → default 2 cells per side.
+   */
+  connectionDetailBoundaryCells?: number
+  /**
+   * Connection-detail sheets only: per-arm flip of catalog layer order in junction strips (`true` = reversed vs default).
+   * Keys: plan direction `up` | `down` | `left` | `right`. Omitted directions use default ordering.
+   */
+  connectionDetailStripLayerFlips?: Partial<Record<'up' | 'down' | 'left' | 'right', true>>
+  /**
+   * Plan assembly-line mode: per stroke kind + segment (`planArchAssemblyFlipEdgeKey` / `openGhostPlanArchAssemblyFlipStorageKey`),
+   * reverse CSV layer stack along thickness. Legacy keys used `placedEdgeKey` only (walls).
+   */
+  planArchEdgeLayerFlipped?: Record<string, true>
+  /**
+   * Legacy (pre–multi-drawing L): per node Ext/Int pick. Read-only migration into
+   * `connectionJunctionHomogeneousLSketchIdByNode` + variant list; not written by new UI.
+   */
+  connectionJunctionConvexConcaveByNode?: Record<string, 'convex' | 'concave'>
+  /**
+   * Homogeneous L/T/X families (`L-hom|T-hom|X-hom\x1f{signature}`): ordered `tpl:…` sketch ids for connection-detail rows.
+   * Omitted → inferred from `connectionSketches` keys (L: legacy `…a`/`…b` hashes) or a single default id.
+   */
+  connectionDetailHomogeneousLVariantIdsByFamily?: Record<string, string[]>
+  /**
+   * Homogeneous L/T/X: which variant sketch (`tpl:…`) applies at this grid node (`i:j`).
+   * Must appear in that family’s variant list; omitted → first variant (L: legacy convex/concave → index 0/1 when inferring from old sheets).
+   */
+  connectionJunctionHomogeneousLSketchIdByNode?: Record<string, string>
+  /**
+   * Connection-detail sheets only: manual layer/MEP fills per irregular grid cell (`i:j`), bounded only by
+   * hand-drawn detail lines (`annotationSectionCuts`) for the Layer fill tool.
+   */
+  connectionDetailLayerFillByCell?: Record<
+    string,
+    { source: 'arch' | 'mep'; systemId: string; layerIndex: number }
+  >
   /**
    * All elevation sheets share this: horizontal grid row index (0…siteNy) for a full-width grade / ground line.
    * Stored on the floor-1 layout sketch (not per cardinal elevation). Aligns with horizontal grid edges.
@@ -203,6 +343,55 @@ export function emptySketch(gridSpacingIn: number): PlanLayoutSketch {
   return { version: PLAN_LAYOUT_VERSION, gridSpacingIn, edges: [], cells: [] }
 }
 
+/** Finer grid (plan inches) for hand-drawn connection-detail layouts vs typical floor layout (e.g. 12). */
+export const CONNECTION_DETAIL_GRID_SPACING_IN = 1 as const
+export const CONNECTION_DETAIL_DEFAULT_SITE_IN = 48 as const
+/** Padded margin around the junction on connection-detail sheets, in detail-grid cell counts per edge. */
+export const CONNECTION_DETAIL_DEFAULT_BOUNDARY_CELLS = 2 as const
+
+export function resolvedConnectionDetailGridSpacingIn(sketch: PlanLayoutSketch): number {
+  const g = sketch.connectionDetailGridSpacingIn
+  return g != null && Number.isFinite(g) && g > 0 ? g : CONNECTION_DETAIL_GRID_SPACING_IN
+}
+
+export function resolvedConnectionDetailBoundaryCells(sketch: PlanLayoutSketch): number {
+  const b = sketch.connectionDetailBoundaryCells
+  if (b != null && Number.isFinite(b)) {
+    const r = Math.round(b)
+    if (r >= 0 && r <= 48) return r
+  }
+  return CONNECTION_DETAIL_DEFAULT_BOUNDARY_CELLS
+}
+
+/** True if a connection-detail sketch has anything that would be invalidated by changing detail grid spacing. */
+export function connectionDetailSketchHasContent(s: PlanLayoutSketch): boolean {
+  if ((s.edges?.length ?? 0) > 0) return true
+  if ((s.cells?.length ?? 0) > 0) return true
+  if ((s.measureRuns?.length ?? 0) > 0) return true
+  if ((s.annotationGridRuns?.length ?? 0) > 0) return true
+  if ((s.annotationLabels?.length ?? 0) > 0) return true
+  if ((s.annotationSectionCuts?.length ?? 0) > 0) return true
+  if ((s.mepDevices?.length ?? 0) > 0) return true
+  if ((s.columns?.length ?? 0) > 0) return true
+  if (s.roomBoundaryEdges && s.roomBoundaryEdges.length > 0) return true
+  if (s.roomByCell && Object.keys(s.roomByCell).length > 0) return true
+  if (s.traceOverlay) return true
+  if (s.connectionDetailStripLayerFlips && Object.keys(s.connectionDetailStripLayerFlips).length > 0)
+    return true
+  if (s.planArchEdgeLayerFlipped && Object.keys(s.planArchEdgeLayerFlipped).length > 0) return true
+  if (s.connectionDetailLayerFillByCell && Object.keys(s.connectionDetailLayerFillByCell).length > 0)
+    return true
+  return false
+}
+
+export function emptyConnectionDetailSketch(): PlanLayoutSketch {
+  return {
+    ...emptySketch(CONNECTION_DETAIL_GRID_SPACING_IN),
+    siteWidthIn: CONNECTION_DETAIL_DEFAULT_SITE_IN,
+    siteDepthIn: CONNECTION_DETAIL_DEFAULT_SITE_IN,
+  }
+}
+
 export function cellKeyString(c: Pick<PlacedFloorCell, 'i' | 'j'>): string {
   return `${c.i}:${c.j}`
 }
@@ -231,7 +420,7 @@ export function placedColumnKey(c: PlacedPlanColumn): string {
   return `${layerIdentityFromColumn(c)}\t${c.id}`
 }
 
-/** Axis-aligned footprint of a square column in plan inches. */
+/** Axis-aligned footprint of a square column in plan inches (includes optional plan offsets from grid center). */
 export function planColumnBoundsIn(c: PlacedPlanColumn): {
   minX: number
   minY: number
@@ -239,11 +428,15 @@ export function planColumnBoundsIn(c: PlacedPlanColumn): {
   maxY: number
 } {
   const h = Math.max(0, c.sizeIn) / 2
+  const ox = c.offsetXPlanIn ?? 0
+  const oy = c.offsetYPlanIn ?? 0
+  const cx = c.cxIn + ox
+  const cy = c.cyIn + oy
   return {
-    minX: c.cxIn - h,
-    minY: c.cyIn - h,
-    maxX: c.cxIn + h,
-    maxY: c.cyIn + h,
+    minX: cx - h,
+    minY: cy - h,
+    maxX: cx + h,
+    maxY: cy + h,
   }
 }
 
@@ -267,33 +460,127 @@ export function planPointInsideColumnFootprint(
   return xIn >= b.minX && xIn <= b.maxX && yIn >= b.minY && yIn <= b.maxY
 }
 
+/** Stable key for a placed MEP device (mep + systemId + id). */
+export function placedMepDeviceKey(d: PlacedMepDevice): string {
+  return `mep\t${d.systemId}\t${d.id}`
+}
+
+/** Whether a placed device has real rectangular dimensions (not a circle fallback). */
+export function mepDeviceHasRealDims(d: PlacedMepDevice): boolean {
+  return (d.lengthIn ?? 0) > 0 && (d.widthIn ?? 0) > 0
+}
+
+/** Axis-aligned footprint of an MEP device in plan inches. */
+export function mepDeviceBoundsIn(d: PlacedMepDevice): {
+  minX: number
+  minY: number
+  maxX: number
+  maxY: number
+} {
+  if (mepDeviceHasRealDims(d)) {
+    const hl = d.lengthIn! / 2
+    const hw = d.widthIn! / 2
+    return {
+      minX: d.cxIn - hl,
+      minY: d.cyIn - hw,
+      maxX: d.cxIn + hl,
+      maxY: d.cyIn + hw,
+    }
+  }
+  const h = Math.max(0, d.sizeIn) / 2
+  return {
+    minX: d.cxIn - h,
+    minY: d.cyIn - h,
+    maxX: d.cxIn + h,
+    maxY: d.cyIn + h,
+  }
+}
+
+export function mepDeviceIntersectsPlanRect(
+  d: PlacedMepDevice,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+): boolean {
+  const b = mepDeviceBoundsIn(d)
+  return !(b.maxX < minX || b.minX > maxX || b.maxY < minY || b.minY > maxY)
+}
+
+export function planPointInsideMepDeviceFootprint(
+  d: PlacedMepDevice,
+  xIn: number,
+  yIn: number,
+): boolean {
+  const b = mepDeviceBoundsIn(d)
+  return xIn >= b.minX && xIn <= b.maxX && yIn >= b.minY && yIn <= b.maxY
+}
+
 /** Unique id for a placed edge (layer + grid segment). */
 export function placedEdgeKey(e: PlacedGridEdge): string {
   return `${layerIdentityFromEdge(e)}\t${edgeKeyString(e)}`
 }
 
-/** Normalize cell paint kind for keys and filters. */
-export function cellPaintKind(c: Pick<PlacedFloorCell, 'cellKind'>): 'floor' | 'stairs' {
-  return c.cellKind === 'stairs' ? 'stairs' : 'floor'
+/** Persisted assembly flip: disambiguates wall vs window vs door vs roof vs stairs on the same grid segment. */
+export function planArchAssemblyFlipEdgeKey(e: PlacedGridEdge): string {
+  return `${placedEdgeKey(e)}\t${e.kind ?? 'wall'}`
 }
 
-/** Floor + stair grid fills (arch catalog) share one slot per unit cell — at most one paint per square. */
+export function openGhostPlanArchAssemblyFlipStorageKey(e: PlacedGridEdge): string {
+  return `open-ghost-${planArchAssemblyFlipEdgeKey(e)}`
+}
+
+/**
+ * Whether assembly stack is reversed for this edge, including legacy map entries (pre–per-kind keys).
+ */
+export function planArchAssemblyLayerOrderFlipped(
+  flipMap: Record<string, true> | undefined,
+  edge: PlacedGridEdge,
+  variant: 'edge' | 'openGhost',
+): boolean {
+  const m = flipMap ?? {}
+  if (variant === 'openGhost') {
+    const nk = openGhostPlanArchAssemblyFlipStorageKey(edge)
+    if (m[nk]) return true
+    return Boolean(m[`open-ghost-${placedEdgeKey(edge)}`])
+  }
+  const nk = planArchAssemblyFlipEdgeKey(edge)
+  if (m[nk]) return true
+  const lk = placedEdgeKey(edge)
+  if ((edge.kind ?? 'wall') === 'wall' && m[lk]) return true
+  return false
+}
+
+/** Normalize cell paint kind for keys and filters. */
+export function cellPaintKind(c: Pick<PlacedFloorCell, 'cellKind'>): 'floor' | 'stairs' | 'roof' {
+  if (c.cellKind === 'stairs') return 'stairs'
+  if (c.cellKind === 'roof') return 'roof'
+  return 'floor'
+}
+
+/** Arch catalog grid fills use merge rules in `mergePaintStrokeIntoCells` / this normalizer. */
 export function isExclusiveArchFloorPaintCell(c: Pick<PlacedFloorCell, 'source'>): boolean {
   return c.source === 'arch'
 }
 
-/** Collapse duplicate arch fills on the same grid square (last in array order wins). */
+/**
+ * Collapse duplicate arch fills per slot: stairs occupy one slot per grid square (replaces floor/roof there);
+ * floor and roof each have a separate slot per square so both can coexist.
+ */
 export function normalizeExclusiveArchFloorPaintCells(cells: PlacedFloorCell[]): PlacedFloorCell[] {
   const nonArch: PlacedFloorCell[] = []
-  const archByGeom = new Map<string, PlacedFloorCell>()
+  const archBySlot = new Map<string, PlacedFloorCell>()
   for (const c of cells) {
     if (!isExclusiveArchFloorPaintCell(c)) {
       nonArch.push(c)
       continue
     }
-    archByGeom.set(cellKeyString(c), c)
+    const g = cellKeyString(c)
+    const pk = cellPaintKind(c)
+    const slotKey = pk === 'stairs' ? `s:${g}` : `a:${g}:${pk}`
+    archBySlot.set(slotKey, c)
   }
-  return [...nonArch, ...archByGeom.values()]
+  return [...nonArch, ...archBySlot.values()]
 }
 
 /** Unique id for a placed floor cell (layer + paint kind + grid cell). */

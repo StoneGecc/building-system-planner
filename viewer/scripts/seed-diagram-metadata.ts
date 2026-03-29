@@ -12,7 +12,7 @@ import { diagramSeedJsonForCsv } from '../src/data/buildingLayout.ts'
 import { getSystemOrientation } from '../src/lib/orientation.ts'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const csvPath = join(__dirname, '../../Building_Systems_Complete.csv')
+const csvPath = join(__dirname, '../public/Building_Systems_Complete.csv')
 const outPath = join(__dirname, 'seed-output.json')
 
 const raw = readFileSync(csvPath, 'utf-8')

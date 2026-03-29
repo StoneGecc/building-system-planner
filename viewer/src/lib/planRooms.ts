@@ -238,8 +238,49 @@ export function listEnclosedPlanRooms(sketch: PlanLayoutSketch, d: BuildingDimen
 }
 
 /**
+ * Removes `roomByCell` keys that are not inside any current enclosed zone, and drops whitespace-only
+ * labels. Orphan entries are left behind when walls or room boundaries change so former “interior”
+ * cells become exterior; UI that uses `listEnclosedPlanRooms` would otherwise disagree with raw key counts.
+ */
+export function withPrunedOrphanRoomByCell(
+  sketch: PlanLayoutSketch,
+  d: BuildingDimensions,
+): PlanLayoutSketch {
+  const rbc = sketch.roomByCell
+  if (!rbc) return sketch
+  const rooms = listEnclosedPlanRooms(sketch, d)
+  const allowed = new Set<string>()
+  for (const r of rooms) {
+    for (const k of r.cellKeys) allowed.add(k)
+  }
+  const next: Record<string, string> = {}
+  for (const [k, v] of Object.entries(rbc)) {
+    if (!allowed.has(k)) continue
+    if (!(v ?? '').trim()) continue
+    next[k] = v
+  }
+  const prevKeys = Object.keys(rbc)
+  const nextKeys = Object.keys(next)
+  if (nextKeys.length === prevKeys.length) {
+    let allMatch = true
+    for (const k of prevKeys) {
+      if (rbc[k] !== next[k]) {
+        allMatch = false
+        break
+      }
+    }
+    if (allMatch) return sketch
+  }
+  return {
+    ...sketch,
+    roomByCell: nextKeys.length > 0 ? next : undefined,
+  }
+}
+
+/**
  * Assigns "Prefix 1", "Prefix 2", … to every enclosed zone (stable grid order).
- * Preserves `roomByCell` entries for cells outside enclosed zones. Prefix defaults to "Room".
+ * Starts from existing `roomByCell` so unrelated keys are carried until the next sketch commit,
+ * where `withPrunedOrphanRoomByCell` drops entries outside enclosed zones. Prefix defaults to "Room".
  */
 export function applySequentialAutoRoomNames(
   sketch: PlanLayoutSketch,
@@ -285,18 +326,20 @@ export type PhysicalSpaceInventoryRow = {
   cellCount: number
 }
 
-/** Enclosed zones from the layout sketch with display names and gross ft² per zone. */
+/** Enclosed zones from the layout sketch with display names and gross ft² per zone (named zones only). */
 export function physicalSpaceInventoryRows(
   sketch: PlanLayoutSketch,
   d: BuildingDimensions,
 ): PhysicalSpaceInventoryRow[] {
   const rooms = listEnclosedPlanRooms(sketch, d)
   const delta = sketch.gridSpacingIn
+  const rbc = sketch.roomByCell
   if (!(delta > 0) || rooms.length === 0) return []
   const cellSqFt = (delta * delta) / 144
-  return rooms.map((room, i) => ({
+  const named = rooms.filter((room) => roomZoneHasAssignedName(room.cellKeys, rbc))
+  return named.map((room, i) => ({
     rowId: [...room.cellKeys].sort().join('|'),
-    name: resolveRoomDisplayName(room.cellKeys, sketch.roomByCell, i + 1),
+    name: resolveRoomDisplayName(room.cellKeys, rbc, i + 1),
     sqFt: room.cellKeys.length * cellSqFt,
     cellCount: room.cellKeys.length,
   }))

@@ -1,5 +1,7 @@
 import type { SystemData } from '../types/system'
 import type { PlanPlaceMode } from './planLayerColors'
+import { isMepPlanDisciplineSystem } from '../data/disciplines'
+import { isMepDisciplineMode } from '../types/planPlaceMode'
 
 export const OPENING_WINDOW_TYPICAL = 'opening_window_typical'
 export const OPENING_DOOR_TYPICAL = 'opening_door_typical'
@@ -35,7 +37,8 @@ export function inferDefaultPlanPlaceModeForArchSystem(s: SystemData): PlanPlace
 
 /** Whether this architectural system appears in the picker for the given plan tool (Walls, Roof, …). */
 export function archSystemMatchesPlanPlaceMode(s: SystemData, mode: PlanPlaceMode): boolean {
-  if (mode === 'annotate' || mode === 'mep' || mode === 'room') return false
+  if (mode === 'annotate' || mode === 'mep' || mode === 'room' || isMepDisciplineMode(mode)) return false
+  if (isMepPlanDisciplineSystem(s.id)) return false
   const tags = s.planDrawLayers
   const st = s.systemType ?? ''
   const stLower = st.toLowerCase()

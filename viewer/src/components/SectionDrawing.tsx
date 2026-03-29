@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import type { RefObject } from 'react'
-import type { BuildingDimensions, Layer, SystemData } from '../types/system'
+import type { BuildingDimensions, Layer, LayerType, SystemData } from '../types/system'
 import { FASTENER_ICON_LABELS, resolveFastenerIcon } from '../lib/fastenerIcons'
-import { HatchDefs } from './HatchDefs'
+import { fillForLayerType, resolveLayerDiagramFill } from '../lib/layerDiagramFill'
 import { TitleBlock } from './TitleBlock'
 import { getSystemOrientation } from '../lib/orientation'
 import {
@@ -156,7 +156,7 @@ export function SectionDrawing({
     }
   }
 
-  const usedTypes = [...new Set(drawLayers.map((l) => l.fill || l.layerType))]
+  const usedTypes = [...new Set(drawLayers.map((l) => l.layerType))]
 
   return (
     <svg
@@ -167,8 +167,6 @@ export function SectionDrawing({
       xmlns="http://www.w3.org/2000/svg"
       fontFamily={MONO}
     >
-      <HatchDefs />
-
       <rect width={SHEET_W} height={SHEET_H} fill="white" />
 
       <rect x={PANEL_X} y={PANEL_Y} width={PANEL_W} height={PANEL_H} fill="none" stroke="black" strokeWidth="0.5" />
@@ -192,7 +190,6 @@ export function SectionDrawing({
       {drawLayers.map((layer, i) => {
         const r = layerRects[i]!
         const isAirGap = layer.layerType === 'AIR_GAP'
-        const fillId = layer.fill || layer.layerType
         const isHovered = hoveredLayerIndex === i
         const fastenerIconId = resolveFastenerIcon(layer)
         const fastenerTip = [layer.fastener, layer.fastenerSize]
@@ -205,7 +202,7 @@ export function SectionDrawing({
               y={r.y}
               width={r.w}
               height={r.h}
-              fill={`url(#p-${fillId})`}
+              fill={resolveLayerDiagramFill(layer)}
               stroke="black"
               strokeWidth={isAirGap ? 0.8 : 0.9}
               strokeDasharray={isAirGap ? '5,3' : undefined}
@@ -362,7 +359,7 @@ export function SectionDrawing({
                 y={PANEL_Y + PANEL_H - 25}
                 width={12}
                 height={12}
-                fill={`url(#p-${type})`}
+                fill={fillForLayerType(type as LayerType)}
                 stroke="black"
                 strokeWidth="0.6"
               />

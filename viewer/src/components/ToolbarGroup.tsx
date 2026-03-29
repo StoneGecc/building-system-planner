@@ -6,15 +6,19 @@ export function ToolbarGroup({
   children,
   className,
   bodyClassName,
+  hint,
 }: {
   title: string
   children: ReactNode
   className?: string
   /** Default: horizontal wrap. Use e.g. flex-col w-full min-w-0 for full-width controls. */
   bodyClassName?: string
+  /** Native tooltip on the panel (use for long instructions instead of inline body text). */
+  hint?: string
 }) {
   return (
     <div
+      title={hint}
       className={cn(
         'flex flex-col gap-1 rounded-md border border-border/70 bg-muted/20 px-2 py-1.5 min-w-0',
         className,

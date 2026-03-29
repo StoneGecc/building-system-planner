@@ -8,12 +8,14 @@ import {
   sheetSubgroupKeyForSystem,
   sheetSubgroupTitle,
 } from '../data/disciplineSheetSubgroups'
-import { PAGE_PHYSICAL_SPACE_INVENTORY, systemPageIndex } from '../data/pageIndices'
-import { ELEVATION_SHEETS } from '../data/elevationSheets'
-import { FLOOR1_SHEETS } from '../data/floor1Sheets'
+import { PAGE_PHYSICAL_SPACE_INVENTORY, systemPageIndexDynamic } from '../data/pageIndices'
+import { buildElevationSheets } from '../data/elevationSheets'
+import { buildLevelSheets, levelSheetFromPageIndex } from '../data/floor1Sheets'
+import type { BuildingLevel } from '../types/planLayout'
 
-const SIDEBAR_FLOOR1_GROUP_KEY = 'composite::floor1'
 const SIDEBAR_ELEVATIONS_GROUP_KEY = 'composite::elevations'
+/** Project-wide grid junction connection sheets (not tied to a single level). */
+const SIDEBAR_CONNECTION_DRAWINGS_GROUP_KEY = 'composite::connection-drawings'
 
 /** First-seen CSV `Category` order within a sheet subgroup. */
 function orderedCategoriesForSystems(systems: SystemData[]): string[] {
@@ -68,15 +70,30 @@ function saveSidebarCollapsed(collapsed: boolean) {
   }
 }
 
+export type ConnectionNavItem = { pageIndex: number; label: string; badge: string }
+
 interface SidebarProps {
   orderedSystems: SystemData[]
   selectedPageIndex: number
   onSelect: (system: SystemData) => void
   onSelectPage: (index: number) => void
   onOpenSearch?: () => void
+  buildingLevels: BuildingLevel[]
+  numLevels: number
+  /** Global connection-detail sheets from the Level 1 layout grid (page indices after system sheets). */
+  connectionNavItems?: readonly ConnectionNavItem[]
 }
 
-export function Sidebar({ orderedSystems, selectedPageIndex, onSelect, onSelectPage, onOpenSearch }: SidebarProps) {
+export function Sidebar({
+  orderedSystems,
+  selectedPageIndex,
+  onSelect,
+  onSelectPage,
+  onOpenSearch,
+  buildingLevels,
+  numLevels,
+  connectionNavItems = [],
+}: SidebarProps) {
   const [railCollapsed, setRailCollapsed] = useState(loadSidebarCollapsed)
   useEffect(() => {
     saveSidebarCollapsed(railCollapsed)
@@ -88,7 +105,13 @@ export function Sidebar({ orderedSystems, selectedPageIndex, onSelect, onSelectP
     for (const d of DISCIPLINES) c[d.code] = d.code !== 'A'
     return c
   })
-  const [subCollapsed, setSubCollapsed] = useState<Record<string, boolean>>({})
+  const [subCollapsed, setSubCollapsed] = useState<Record<string, boolean>>(() => {
+    const c: Record<string, boolean> = {}
+    for (const level of buildingLevels) {
+      c[`level::${level.id}`] = true
+    }
+    return c
+  })
   const [hiddenDisciplines, setHiddenDisciplines] = useState(loadHiddenDisciplines)
   const [discMenuOpen, setDiscMenuOpen] = useState(false)
   const discMenuRef = useRef<HTMLDivElement>(null)
@@ -96,6 +119,41 @@ export function Sidebar({ orderedSystems, selectedPageIndex, onSelect, onSelectP
   useEffect(() => {
     saveHiddenDisciplines(hiddenDisciplines)
   }, [hiddenDisciplines])
+
+  useEffect(() => {
+    setSubCollapsed((prev) => {
+      let changed = false
+      const next = { ...prev }
+      for (const level of buildingLevels) {
+        const key = `level::${level.id}`
+        if (!(key in next)) {
+          next[key] = true
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [buildingLevels])
+
+  useEffect(() => {
+    const info = levelSheetFromPageIndex(selectedPageIndex, numLevels)
+    if (!info) return
+    const level = buildingLevels[info.levelIndex]
+    if (!level) return
+    const key = `level::${level.id}`
+    setSubCollapsed((prev) => (prev[key] === true ? { ...prev, [key]: false } : prev))
+  }, [selectedPageIndex, numLevels, buildingLevels])
+
+  useEffect(() => {
+    if (connectionNavItems.length === 0) return
+    const hit = connectionNavItems.some((c) => c.pageIndex === selectedPageIndex)
+    if (!hit) return
+    setSubCollapsed((prev) =>
+      prev[SIDEBAR_CONNECTION_DRAWINGS_GROUP_KEY] === true
+        ? { ...prev, [SIDEBAR_CONNECTION_DRAWINGS_GROUP_KEY]: false }
+        : prev,
+    )
+  }, [selectedPageIndex, connectionNavItems])
 
   useEffect(() => {
     if (!discMenuOpen) return
@@ -321,140 +379,220 @@ export function Sidebar({ orderedSystems, selectedPageIndex, onSelect, onSelectP
               Physical space inventory
             </span>
           </button>
-          <div>
-            <button
-              type="button"
-              onClick={() => toggleSub(SIDEBAR_FLOOR1_GROUP_KEY)}
-              className={cn(
-                'w-full flex items-center justify-between gap-2',
-                'px-4 py-1.5 text-left',
-                'hover:bg-muted/60 transition-colors duration-75',
-              )}
-            >
-              <span className="font-mono text-[8px] tracking-wide text-muted-foreground min-w-0 flex-1 text-left leading-snug truncate">
-                Floor 1
-              </span>
-              <svg
-                width="8"
-                height="8"
-                viewBox="0 0 10 10"
-                className={cn(
-                  'text-muted-foreground shrink-0 transition-transform duration-150',
-                  subCollapsed[SIDEBAR_FLOOR1_GROUP_KEY] !== true ? 'rotate-180' : 'rotate-0',
+          {buildingLevels.map((level, levelIdx) => {
+            const levelGroupKey = `level::${level.id}`
+            const sheets = buildLevelSheets(levelIdx)
+            return (
+              <div key={level.id}>
+                <button
+                  type="button"
+                  onClick={() => toggleSub(levelGroupKey)}
+                  className={cn(
+                    'w-full flex items-center justify-between gap-2',
+                    'px-4 py-1.5 text-left',
+                    'hover:bg-muted/60 transition-colors duration-75',
+                  )}
+                >
+                  <span className="font-mono text-[8px] tracking-wide text-muted-foreground min-w-0 flex-1 text-left leading-snug truncate">
+                    {level.label}
+                  </span>
+                  <svg
+                    width="8"
+                    height="8"
+                    viewBox="0 0 10 10"
+                    className={cn(
+                      'text-muted-foreground shrink-0 transition-transform duration-150',
+                      subCollapsed[levelGroupKey] !== true ? 'rotate-180' : 'rotate-0',
+                    )}
+                    aria-hidden
+                  >
+                    <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                  </svg>
+                </button>
+                {subCollapsed[levelGroupKey] !== true && (
+                  <ul className="pb-0.5">
+                    {sheets.map((sheet) => (
+                      <li key={sheet.id}>
+                        <button
+                          type="button"
+                          onClick={() => onSelectPage(sheet.pageIndex)}
+                          className={cn(
+                            'w-full flex items-center gap-2.5 py-2 pr-4 pl-6 text-left',
+                            'border-l-2 transition-colors duration-75',
+                            selectedPageIndex === sheet.pageIndex
+                              ? 'border-l-foreground bg-muted'
+                              : 'border-l-transparent hover:bg-muted/60',
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              'font-mono text-[9px] font-bold tracking-wider shrink-0',
+                              'inline-flex items-center justify-center min-w-[2rem] h-4 px-1',
+                              'border',
+                              selectedPageIndex === sheet.pageIndex
+                                ? 'border-foreground text-foreground'
+                                : 'border-border text-muted-foreground',
+                            )}
+                          >
+                            {sheet.badge}
+                          </span>
+                          <span
+                            className={cn(
+                              'font-mono text-[9px] leading-none',
+                              selectedPageIndex === sheet.pageIndex ? 'text-foreground font-medium' : 'text-muted-foreground',
+                            )}
+                          >
+                            {sheet.label}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
                 )}
-                aria-hidden
-              >
-                <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
-              </svg>
-            </button>
-            {subCollapsed[SIDEBAR_FLOOR1_GROUP_KEY] !== true && (
-              <ul className="pb-0.5">
-                {FLOOR1_SHEETS.map((sheet) => (
-                  <li key={sheet.id}>
-                    <button
-                      type="button"
-                      onClick={() => onSelectPage(sheet.pageIndex)}
-                      className={cn(
-                        'w-full flex items-center gap-2.5 py-2 pr-4 pl-6 text-left',
-                        'border-l-2 transition-colors duration-75',
-                        selectedPageIndex === sheet.pageIndex
-                          ? 'border-l-foreground bg-muted'
-                          : 'border-l-transparent hover:bg-muted/60',
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          'font-mono text-[9px] font-bold tracking-wider shrink-0',
-                          'inline-flex items-center justify-center min-w-[2rem] h-4 px-1',
-                          'border',
-                          selectedPageIndex === sheet.pageIndex
-                            ? 'border-foreground text-foreground'
-                            : 'border-border text-muted-foreground',
-                        )}
-                      >
-                        {sheet.badge}
-                      </span>
-                      <span
-                        className={cn(
-                          'font-mono text-[9px] leading-none',
-                          selectedPageIndex === sheet.pageIndex ? 'text-foreground font-medium' : 'text-muted-foreground',
-                        )}
-                      >
-                        {sheet.label}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-          <div>
-            <button
-              type="button"
-              onClick={() => toggleSub(SIDEBAR_ELEVATIONS_GROUP_KEY)}
-              className={cn(
-                'w-full flex items-center justify-between gap-2',
-                'px-4 py-1.5 text-left',
-                'hover:bg-muted/60 transition-colors duration-75',
-              )}
-            >
-              <span className="font-mono text-[8px] tracking-wide text-muted-foreground min-w-0 flex-1 text-left leading-snug truncate">
-                Elevations
-              </span>
-              <svg
-                width="8"
-                height="8"
-                viewBox="0 0 10 10"
-                className={cn(
-                  'text-muted-foreground shrink-0 transition-transform duration-150',
-                  subCollapsed[SIDEBAR_ELEVATIONS_GROUP_KEY] !== true ? 'rotate-180' : 'rotate-0',
+              </div>
+            )
+          })}
+          {(() => {
+            const elevSheets = buildElevationSheets(numLevels)
+            return (
+              <div>
+                <button
+                  type="button"
+                  onClick={() => toggleSub(SIDEBAR_ELEVATIONS_GROUP_KEY)}
+                  className={cn(
+                    'w-full flex items-center justify-between gap-2',
+                    'px-4 py-1.5 text-left',
+                    'hover:bg-muted/60 transition-colors duration-75',
+                  )}
+                >
+                  <span className="font-mono text-[8px] tracking-wide text-muted-foreground min-w-0 flex-1 text-left leading-snug truncate">
+                    Elevations
+                  </span>
+                  <svg
+                    width="8"
+                    height="8"
+                    viewBox="0 0 10 10"
+                    className={cn(
+                      'text-muted-foreground shrink-0 transition-transform duration-150',
+                      subCollapsed[SIDEBAR_ELEVATIONS_GROUP_KEY] !== true ? 'rotate-180' : 'rotate-0',
+                    )}
+                    aria-hidden
+                  >
+                    <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                  </svg>
+                </button>
+                {subCollapsed[SIDEBAR_ELEVATIONS_GROUP_KEY] !== true && (
+                  <ul className="pb-0.5">
+                    {elevSheets.map((sheet) => (
+                      <li key={sheet.id}>
+                        <button
+                          type="button"
+                          onClick={() => onSelectPage(sheet.pageIndex)}
+                          className={cn(
+                            'w-full flex items-center gap-2.5 py-2 pr-4 pl-6 text-left',
+                            'border-l-2 transition-colors duration-75',
+                            selectedPageIndex === sheet.pageIndex
+                              ? 'border-l-foreground bg-muted'
+                              : 'border-l-transparent hover:bg-muted/60',
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              'font-mono text-[9px] font-bold tracking-wider shrink-0',
+                              'inline-flex items-center justify-center min-w-[2rem] h-4 px-1',
+                              'border',
+                              selectedPageIndex === sheet.pageIndex
+                                ? 'border-foreground text-foreground'
+                                : 'border-border text-muted-foreground',
+                            )}
+                          >
+                            {sheet.badge}
+                          </span>
+                          <span
+                            className={cn(
+                              'font-mono text-[9px] leading-none',
+                              selectedPageIndex === sheet.pageIndex ? 'text-foreground font-medium' : 'text-muted-foreground',
+                            )}
+                          >
+                            {sheet.label}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
                 )}
-                aria-hidden
+              </div>
+            )
+          })()}
+          {connectionNavItems.length > 0 && (
+            <div>
+              <button
+                type="button"
+                onClick={() => toggleSub(SIDEBAR_CONNECTION_DRAWINGS_GROUP_KEY)}
+                className={cn(
+                  'w-full flex items-center justify-between gap-2',
+                  'px-4 py-1.5 text-left',
+                  'hover:bg-muted/60 transition-colors duration-75',
+                )}
               >
-                <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
-              </svg>
-            </button>
-            {subCollapsed[SIDEBAR_ELEVATIONS_GROUP_KEY] !== true && (
-              <ul className="pb-0.5">
-                {ELEVATION_SHEETS.map((sheet) => (
-                  <li key={sheet.id}>
-                    <button
-                      type="button"
-                      onClick={() => onSelectPage(sheet.pageIndex)}
-                      className={cn(
-                        'w-full flex items-center gap-2.5 py-2 pr-4 pl-6 text-left',
-                        'border-l-2 transition-colors duration-75',
-                        selectedPageIndex === sheet.pageIndex
-                          ? 'border-l-foreground bg-muted'
-                          : 'border-l-transparent hover:bg-muted/60',
-                      )}
-                    >
-                      <span
+                <span className="font-mono text-[8px] tracking-wide text-muted-foreground min-w-0 flex-1 text-left leading-snug truncate">
+                  Connection drawings
+                </span>
+                <svg
+                  width="8"
+                  height="8"
+                  viewBox="0 0 10 10"
+                  className={cn(
+                    'text-muted-foreground shrink-0 transition-transform duration-150',
+                    subCollapsed[SIDEBAR_CONNECTION_DRAWINGS_GROUP_KEY] !== true ? 'rotate-180' : 'rotate-0',
+                  )}
+                  aria-hidden
+                >
+                  <polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                </svg>
+              </button>
+              {subCollapsed[SIDEBAR_CONNECTION_DRAWINGS_GROUP_KEY] !== true && (
+                <ul className="pb-0.5">
+                  {connectionNavItems.map((item) => (
+                    <li key={item.pageIndex}>
+                      <button
+                        type="button"
+                        onClick={() => onSelectPage(item.pageIndex)}
                         className={cn(
-                          'font-mono text-[9px] font-bold tracking-wider shrink-0',
-                          'inline-flex items-center justify-center min-w-[2rem] h-4 px-1',
-                          'border',
-                          selectedPageIndex === sheet.pageIndex
-                            ? 'border-foreground text-foreground'
-                            : 'border-border text-muted-foreground',
+                          'w-full flex items-center gap-2.5 py-2 pr-4 pl-6 text-left',
+                          'border-l-2 transition-colors duration-75',
+                          selectedPageIndex === item.pageIndex
+                            ? 'border-l-foreground bg-muted'
+                            : 'border-l-transparent hover:bg-muted/60',
                         )}
                       >
-                        {sheet.badge}
-                      </span>
-                      <span
-                        className={cn(
-                          'font-mono text-[9px] leading-none',
-                          selectedPageIndex === sheet.pageIndex ? 'text-foreground font-medium' : 'text-muted-foreground',
-                        )}
-                      >
-                        {sheet.label}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+                        <span
+                          className={cn(
+                            'font-mono text-[9px] font-bold tracking-wider shrink-0',
+                            'inline-flex items-center justify-center min-w-[2rem] h-4 px-1',
+                            'border',
+                            selectedPageIndex === item.pageIndex
+                              ? 'border-foreground text-foreground'
+                              : 'border-border text-muted-foreground',
+                          )}
+                        >
+                          {item.badge}
+                        </span>
+                        <span
+                          className={cn(
+                            'font-mono text-[9px] leading-tight text-left min-w-0 break-words',
+                            selectedPageIndex === item.pageIndex ? 'text-foreground font-medium' : 'text-muted-foreground',
+                          )}
+                        >
+                          {item.label}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
         <div className="h-px bg-border mx-4 my-1" aria-hidden />
 
@@ -595,7 +733,7 @@ export function Sidebar({ orderedSystems, selectedPageIndex, onSelect, onSelectP
                                 const sheetPad = hasCategoryLayer ? 'pl-6' : 'pl-4'
                                 const sheetBtn = (sys: SystemData) => {
                                   const idx = orderedSystems.findIndex((s) => s.id === sys.id)
-                                  const sysPage = idx >= 0 ? systemPageIndex(idx) : -1
+                                  const sysPage = idx >= 0 ? systemPageIndexDynamic(idx, numLevels) : -1
                                   const isSelected = selectedPageIndex === sysPage
                                   return (
                                     <li key={sys.id}>

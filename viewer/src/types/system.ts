@@ -49,6 +49,8 @@ export interface Layer {
   detailMinFeaturePx?: number
   layerType: LayerType
   fill?: string
+  /** Optional `Layer_Color` / hex in `Fill` from CSV (6 hex digits, no #). */
+  colorHex?: string
   notes: string
   visible?: boolean
 }
@@ -78,6 +80,8 @@ export interface SystemData {
   sheetOrder?: number
   diagramLabel?: string
   diagramHatch?: string
+  /** Optional `Diagram_Color` from CSV (6 hex digits) for composite section/plan zones. */
+  diagramColorHex?: string
   diagramSectionZonesJson?: string
   diagramPlanZonesJson?: string
   viewOrientation?: Orientation
@@ -86,6 +90,16 @@ export interface SystemData {
   viewBottomLabel?: string
   /** System-level override; else BLD `default_diagram_detail_level`. */
   diagramDetailLevel?: DiagramDetailLevel
+  /** Plan-view stroke width for MEP runs (inches). 0 or absent = use default hairline. */
+  planDrawWidthIn?: number
+  /** Equipment plan footprint length (long axis) in inches. */
+  planEquipLengthIn?: number
+  /** Equipment plan footprint width (short axis) in inches. */
+  planEquipWidthIn?: number
+  /** Equipment depth/height in inches (3-D reference, not used in plan view). */
+  planEquipDepthIn?: number
+  /** Optional `Plan_Color` from CSV (hex6) for MEP plan strokes when derived from main sheet. */
+  planColorHex?: string
 }
 
 export interface CategoryGroup {

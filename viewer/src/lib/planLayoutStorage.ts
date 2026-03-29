@@ -210,14 +210,150 @@ function parseElevationLevelLines(raw: unknown): ElevationLevelLine[] | undefine
   return out.length > 0 ? out : undefined
 }
 
+const CONNECTION_DETAIL_STRIP_DIRS = ['up', 'down', 'left', 'right'] as const
+
+function parseConnectionDetailStripLayerFlips(
+  raw: unknown,
+): PlanLayoutSketch['connectionDetailStripLayerFlips'] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const out: NonNullable<PlanLayoutSketch['connectionDetailStripLayerFlips']> = {}
+  for (const d of CONNECTION_DETAIL_STRIP_DIRS) {
+    if (o[d] === true) out[d] = true
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+function parseConnectionJunctionConvexConcaveByNode(
+  raw: unknown,
+): PlanLayoutSketch['connectionJunctionConvexConcaveByNode'] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const out: NonNullable<PlanLayoutSketch['connectionJunctionConvexConcaveByNode']> = {}
+  for (const [k, v] of Object.entries(o)) {
+    if (!/^\d+:\d+$/.test(k)) continue
+    if (v === 'convex' || v === 'concave') out[k] = v
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+function parseConnectionDetailHomogeneousLVariantIdsByFamily(
+  raw: unknown,
+): PlanLayoutSketch['connectionDetailHomogeneousLVariantIdsByFamily'] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const out: NonNullable<PlanLayoutSketch['connectionDetailHomogeneousLVariantIdsByFamily']> = {}
+  for (const [familyKey, v] of Object.entries(o)) {
+    if (typeof familyKey !== 'string' || familyKey.length === 0) continue
+    if (!Array.isArray(v)) continue
+    const ids: string[] = []
+    const seen = new Set<string>()
+    for (const x of v) {
+      if (typeof x !== 'string' || !x.startsWith('tpl:')) continue
+      if (seen.has(x)) continue
+      seen.add(x)
+      ids.push(x)
+    }
+    if (ids.length > 0) out[familyKey] = ids
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+function parseConnectionJunctionHomogeneousLSketchIdByNode(
+  raw: unknown,
+): PlanLayoutSketch['connectionJunctionHomogeneousLSketchIdByNode'] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const out: NonNullable<PlanLayoutSketch['connectionJunctionHomogeneousLSketchIdByNode']> = {}
+  for (const [k, v] of Object.entries(o)) {
+    if (!/^\d+:\d+$/.test(k)) continue
+    if (typeof v !== 'string' || !v.startsWith('tpl:')) continue
+    out[k] = v
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+function parsePlanArchEdgeLayerFlipped(raw: unknown): PlanLayoutSketch['planArchEdgeLayerFlipped'] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const out: NonNullable<PlanLayoutSketch['planArchEdgeLayerFlipped']> = {}
+  for (const [k, v] of Object.entries(o)) {
+    if (typeof k !== 'string' || k.length === 0) continue
+    if (v === true) out[k] = true
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+function parseConnectionDetailLayerFillByCell(
+  raw: unknown,
+): PlanLayoutSketch['connectionDetailLayerFillByCell'] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const out: NonNullable<PlanLayoutSketch['connectionDetailLayerFillByCell']> = {}
+  for (const [k, v] of Object.entries(o)) {
+    if (!/^\d+:\d+$/.test(k)) continue
+    if (!v || typeof v !== 'object') continue
+    const rec = v as Record<string, unknown>
+    const src = rec.source === 'mep' ? 'mep' : rec.source === 'arch' ? 'arch' : null
+    const systemId = typeof rec.systemId === 'string' ? rec.systemId : null
+    const layerIndex = Number(rec.layerIndex)
+    if (!src || !systemId || !Number.isFinite(layerIndex) || layerIndex < 0) continue
+    out[k] = { source: src, systemId, layerIndex: Math.round(layerIndex) }
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
 const LS_PREFIX = 'building-impl-plan-v1'
 
 function storageKey(footprintKey: string): string {
   return `${LS_PREFIX}:${footprintKey}`
 }
 
+function levelStorageKey(footprintKey: string, levelId: string): string {
+  return `${LS_PREFIX}:level:${levelId}:${footprintKey}`
+}
+
 function elevationStorageKey(footprintKey: string, face: ElevationFace): string {
   return `${LS_PREFIX}:elev:${face}:${footprintKey}`
+}
+
+function connectionSketchesMapStorageKey(footprintKey: string): string {
+  return `${LS_PREFIX}:connections:${footprintKey}`
+}
+
+function parseSketchRecordMap(raw: unknown): Record<string, PlanLayoutSketch> {
+  const out: Record<string, PlanLayoutSketch> = {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!v) continue
+    const s = parsePlanLayoutSketchFromJsonValue(v)
+    if (s) out[k] = s
+  }
+  return out
+}
+
+/** All connection-detail sketches for this footprint (keyed by stable template `connection.id`). */
+export function loadConnectionSketchesMapFromLocalStorage(
+  d: BuildingDimensions,
+): Record<string, PlanLayoutSketch> {
+  try {
+    const raw = localStorage.getItem(connectionSketchesMapStorageKey(footprintStorageKey(d)))
+    if (!raw) return {}
+    return parseSketchRecordMap(JSON.parse(raw))
+  } catch {
+    return {}
+  }
+}
+
+export function saveConnectionSketchesMapToLocalStorage(
+  d: BuildingDimensions,
+  map: Record<string, PlanLayoutSketch>,
+): void {
+  try {
+    localStorage.setItem(connectionSketchesMapStorageKey(footprintStorageKey(d)), JSON.stringify(map))
+  } catch {
+    /* quota or private mode */
+  }
 }
 
 export function loadSketchFromLocalStorage(
@@ -249,6 +385,18 @@ export function loadSketchFromLocalStorage(
     const columns = parseColumns(rec.columns)
     const egpj = Number(rec.elevationGroundPlaneJ)
     const elevationLevelLines = parseElevationLevelLines(rec.elevationLevelLines)
+    const cdg = Number(rec.connectionDetailGridSpacingIn)
+    const cdbc = Number(rec.connectionDetailBoundaryCells)
+    const cdStripFlips = parseConnectionDetailStripLayerFlips(rec.connectionDetailStripLayerFlips)
+    const ccNode = parseConnectionJunctionConvexConcaveByNode(rec.connectionJunctionConvexConcaveByNode)
+    const homVar = parseConnectionDetailHomogeneousLVariantIdsByFamily(
+      rec.connectionDetailHomogeneousLVariantIdsByFamily,
+    )
+    const homNode = parseConnectionJunctionHomogeneousLSketchIdByNode(
+      rec.connectionJunctionHomogeneousLSketchIdByNode,
+    )
+    const archFlip = parsePlanArchEdgeLayerFlipped(rec.planArchEdgeLayerFlipped)
+    const cdLayerFill = parseConnectionDetailLayerFillByCell(rec.connectionDetailLayerFillByCell)
     return {
       version: PLAN_LAYOUT_VERSION,
       gridSpacingIn,
@@ -265,6 +413,14 @@ export function loadSketchFromLocalStorage(
       ...(traceOverlay ? { traceOverlay } : {}),
       ...(roomBoundaryEdges ? { roomBoundaryEdges } : {}),
       ...(roomByCell ? { roomByCell } : {}),
+      ...(Number.isFinite(cdg) && cdg > 0 ? { connectionDetailGridSpacingIn: cdg } : {}),
+      ...(Number.isFinite(cdbc) && cdbc >= 0 && cdbc <= 48 ? { connectionDetailBoundaryCells: Math.round(cdbc) } : {}),
+      ...(cdStripFlips ? { connectionDetailStripLayerFlips: cdStripFlips } : {}),
+      ...(ccNode ? { connectionJunctionConvexConcaveByNode: ccNode } : {}),
+      ...(homVar ? { connectionDetailHomogeneousLVariantIdsByFamily: homVar } : {}),
+      ...(homNode ? { connectionJunctionHomogeneousLSketchIdByNode: homNode } : {}),
+      ...(archFlip ? { planArchEdgeLayerFlipped: archFlip } : {}),
+      ...(cdLayerFill ? { connectionDetailLayerFillByCell: cdLayerFill } : {}),
       ...(Number.isFinite(egpj) && egpj >= 0 ? { elevationGroundPlaneJ: Math.round(egpj) } : {}),
       ...(elevationLevelLines ? { elevationLevelLines } : {}),
     }
@@ -344,6 +500,31 @@ export function saveSketchToLocalStorage(d: BuildingDimensions, sketch: PlanLayo
   }
 }
 
+export function loadLevelSketchFromLocalStorage(
+  d: BuildingDimensions,
+  levelId: string,
+): PlanLayoutSketch | null {
+  try {
+    const raw = localStorage.getItem(levelStorageKey(footprintStorageKey(d), levelId))
+    if (!raw) return null
+    return parsePlanLayoutSketchFromJsonValue(JSON.parse(raw))
+  } catch {
+    return null
+  }
+}
+
+export function saveLevelSketchToLocalStorage(
+  d: BuildingDimensions,
+  levelId: string,
+  sketch: PlanLayoutSketch,
+): void {
+  try {
+    localStorage.setItem(levelStorageKey(footprintStorageKey(d), levelId), JSON.stringify(sketch))
+  } catch {
+    /* quota or private mode */
+  }
+}
+
 export function downloadSketchJson(sketch: PlanLayoutSketch, filename = 'floor-1-layout.json') {
   const blob = new Blob([JSON.stringify(sketch, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
@@ -354,15 +535,24 @@ export function downloadSketchJson(sketch: PlanLayoutSketch, filename = 'floor-1
   URL.revokeObjectURL(url)
 }
 
-/** Full project: Floor 1 sketch plus all elevation sketches (one file to move between browsers). */
+/**
+ * Full project: Floor 1 sketch plus all elevation sketches (one file to move between browsers).
+ * Optional `connectionSketches` stores hand-drawn per-template connection detail layouts (bundle v3+).
+ * Connection **sheet list** (which junction types exist) is still derived from floor1 + catalog when loaded.
+ */
 export const PLAN_BUNDLE_FORMAT = 'building-plan-bundle' as const
-export const PLAN_BUNDLE_VERSION = 1 as const
+export const PLAN_BUNDLE_VERSION = 3 as const
 
 export function downloadPlanBundleJson(
-  payload: { floor1: PlanLayoutSketch; elevations: Record<ElevationFace, PlanLayoutSketch> },
+  payload: {
+    floor1: PlanLayoutSketch
+    elevations: Record<ElevationFace, PlanLayoutSketch>
+    levelSketches?: Record<string, PlanLayoutSketch>
+    connectionSketches?: Record<string, PlanLayoutSketch>
+  },
   filename = 'building-plan.json',
 ): void {
-  const out = {
+  const out: Record<string, unknown> = {
     format: PLAN_BUNDLE_FORMAT,
     bundleVersion: PLAN_BUNDLE_VERSION,
     floor1: payload.floor1,
@@ -372,6 +562,12 @@ export function downloadPlanBundleJson(
       S: payload.elevations.S,
       W: payload.elevations.W,
     },
+  }
+  if (payload.levelSketches && Object.keys(payload.levelSketches).length > 0) {
+    out.levelSketches = payload.levelSketches
+  }
+  if (payload.connectionSketches && Object.keys(payload.connectionSketches).length > 0) {
+    out.connectionSketches = payload.connectionSketches
   }
   const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
@@ -404,6 +600,18 @@ export function parsePlanLayoutSketchFromJsonValue(raw: unknown): PlanLayoutSket
     const columns = parseColumns(rec.columns)
     const egpj = Number(rec.elevationGroundPlaneJ)
     const elevationLevelLines = parseElevationLevelLines(rec.elevationLevelLines)
+    const cdg = Number(rec.connectionDetailGridSpacingIn)
+    const cdbc = Number(rec.connectionDetailBoundaryCells)
+    const cdStripFlips = parseConnectionDetailStripLayerFlips(rec.connectionDetailStripLayerFlips)
+    const ccNode = parseConnectionJunctionConvexConcaveByNode(rec.connectionJunctionConvexConcaveByNode)
+    const homVar = parseConnectionDetailHomogeneousLVariantIdsByFamily(
+      rec.connectionDetailHomogeneousLVariantIdsByFamily,
+    )
+    const homNode = parseConnectionJunctionHomogeneousLSketchIdByNode(
+      rec.connectionJunctionHomogeneousLSketchIdByNode,
+    )
+    const archFlip = parsePlanArchEdgeLayerFlipped(rec.planArchEdgeLayerFlipped)
+    const cdLayerFill = parseConnectionDetailLayerFillByCell(rec.connectionDetailLayerFillByCell)
     return {
       version: o.version,
       gridSpacingIn: o.gridSpacingIn,
@@ -420,6 +628,14 @@ export function parsePlanLayoutSketchFromJsonValue(raw: unknown): PlanLayoutSket
       ...(traceOverlay ? { traceOverlay } : {}),
       ...(roomBoundaryEdges ? { roomBoundaryEdges } : {}),
       ...(roomByCell ? { roomByCell } : {}),
+      ...(Number.isFinite(cdg) && cdg > 0 ? { connectionDetailGridSpacingIn: cdg } : {}),
+      ...(Number.isFinite(cdbc) && cdbc >= 0 && cdbc <= 48 ? { connectionDetailBoundaryCells: Math.round(cdbc) } : {}),
+      ...(cdStripFlips ? { connectionDetailStripLayerFlips: cdStripFlips } : {}),
+      ...(ccNode ? { connectionJunctionConvexConcaveByNode: ccNode } : {}),
+      ...(homVar ? { connectionDetailHomogeneousLVariantIdsByFamily: homVar } : {}),
+      ...(homNode ? { connectionJunctionHomogeneousLSketchIdByNode: homNode } : {}),
+      ...(archFlip ? { planArchEdgeLayerFlipped: archFlip } : {}),
+      ...(cdLayerFill ? { connectionDetailLayerFillByCell: cdLayerFill } : {}),
       ...(Number.isFinite(egpj) && egpj >= 0 ? { elevationGroundPlaneJ: Math.round(egpj) } : {}),
       ...(elevationLevelLines ? { elevationLevelLines } : {}),
     }
@@ -429,8 +645,18 @@ export function parsePlanLayoutSketchFromJsonValue(raw: unknown): PlanLayoutSket
 }
 
 export type PlanBundleImportResult =
-  | { kind: 'bundle'; floor1: PlanLayoutSketch; elevations: Record<ElevationFace, PlanLayoutSketch> }
+  | {
+      kind: 'bundle'
+      floor1: PlanLayoutSketch
+      elevations: Record<ElevationFace, PlanLayoutSketch>
+      levelSketches: Record<string, PlanLayoutSketch>
+      connectionSketches: Record<string, PlanLayoutSketch>
+    }
   | { kind: 'sketch'; sketch: PlanLayoutSketch }
+
+function parseLevelSketches(raw: unknown): Record<string, PlanLayoutSketch> {
+  return parseSketchRecordMap(raw)
+}
 
 export function readPlanBundleOrSketchFromFile(file: File): Promise<PlanBundleImportResult | null> {
   return new Promise((resolve) => {
@@ -462,7 +688,9 @@ export function readPlanBundleOrSketchFromFile(file: File): Promise<PlanBundleIm
             for (const f of faces) {
               if (!elevations[f]) elevations[f] = emptySketch(floor1.gridSpacingIn)
             }
-            resolve({ kind: 'bundle', floor1, elevations })
+            const levelSketches = parseLevelSketches(rec.levelSketches)
+            const connectionSketches = parseSketchRecordMap(rec.connectionSketches)
+            resolve({ kind: 'bundle', floor1, elevations, levelSketches, connectionSketches })
             return
           }
         }
